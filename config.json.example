@@ -1,0 +1,42 @@
+{
+  "poll_interval_seconds": 300,
+  "deep_scan_on_alert": true,
+  "auto_sync_database": true,
+  "defenses": {
+    "llmnr_canary_enabled": true,
+    "dns_integrity_enabled": true,
+    "ipv6_guard_enabled": true,
+    "port_drift_enabled": true,
+    "honey_port_enabled": true,
+    "honey_ports": [5555, 2323, 8888]
+  },
+  "ai_analysis": {
+    "enabled": false,
+    "provider": "ollama",
+    "endpoint": "http://localhost:11434",
+    "model": "qwen2.5:0.5b",
+    "api_key": "",
+    "timeout_seconds": 90,
+    "analyze_on": "alien_only",
+    "cache_results": true
+  },
+  "notifications": {
+    "telegram": {
+      "enabled": true,
+      "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+      "chat_id": "YOUR_TELEGRAM_CHAT_ID"
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": "https://discord.com/api/webhooks/YOUR_DISCORD_WEBHOOK_URL"
+    },
+    "slack": {
+      "enabled": false,
+      "webhook_url": "https://hooks.slack.com/services/YOUR_SLACK_WEBHOOK_URL"
+    },
+    "generic_webhook": {
+      "enabled": false,
+      "url": "https://example.com/api/lan-alerts"
+    }
+  }
+}

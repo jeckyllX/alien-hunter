@@ -1,0 +1,20 @@
+{
+  "AA:BB:CC:DD:EE:FF": {
+    "name": "My Router / Gateway",
+    "owner": "Network Admin",
+    "device_type": "Router",
+    "trusted": true
+  },
+  "11:22:33:44:55:66": {
+    "name": "Personal Laptop",
+    "owner": "Me",
+    "device_type": "Laptop",
+    "trusted": true
+  },
+  "99:88:77:66:55:44": {
+    "name": "Living Room TV",
+    "owner": "Family",
+    "device_type": "Smart TV",
+    "trusted": true
+  }
+}

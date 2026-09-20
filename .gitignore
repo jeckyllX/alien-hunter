@@ -1,0 +1,15 @@
+# Personal device databases and webhooks (NEVER commit personal data)
+known_devices.json
+config.json
+TODO.md
+*.json.local
+
+# Python cache & logs
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# System files
+.DS_Store
+*.swp

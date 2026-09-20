@@ -1,0 +1,30 @@
+[Unit]
+Description=Alien Hunter Network Sentinel Daemon
+Documentation=https://github.com/jekyll86/alien-hunter
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+
+# Set WorkingDirectory to your installation folder where config.json and known_devices.json reside
+WorkingDirectory=/opt/alien-hunter
+
+# PYTHONUNBUFFERED ensures logs stream immediately to journalctl without output buffering
+Environment=PYTHONUNBUFFERED=1
+
+# Execution command: runs in continuous sentinel / watchdog mode
+ExecStart=/usr/bin/python3 /opt/alien-hunter/alien_hunter.py --watch --interval 300
+
+# Process management & restart policy
+Restart=always
+RestartSec=15
+
+# Standard systemd logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alien-hunter
+
+[Install]
+WantedBy=multi-user.target
