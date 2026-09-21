@@ -17,7 +17,7 @@ Most common network discovery tools (and simple `ping` sweep scripts) fail to se
 
 ## 🛡️ How Alien Hunter Solves This
 
-Alien Hunter combines multi-layered active reconnaissance and real-time intrusion defenses to achieve near-100% network visibility:
+Alien Hunter combines multi-protocol network discovery with active intrusion defenses:
 
 ### Multi-Protocol Device Discovery
 * **Layer-2 ARP Hardware Sweeps:** Bypasses OS-level host firewalls and probes the physical data link layer using raw ARP frames.
@@ -37,8 +37,8 @@ Alien Hunter combines multi-layered active reconnaissance and real-time intrusio
 * **Remote Promiscuous Node Detection (Anti-Sniff):** Sends hardware MAC filter bypass ARP probes to detect silent unauthorized sniffing taps on the LAN.
 * **Rogue DHCP Server & Gateway Hijacking Guard:** Probes UDP 67/68 to catch unauthorized DHCP servers or malicious gateway route offerings.
 * **Whitelist & Alien Alerting:** Compares discovered devices against a trusted whitelist (`known_devices.json`). Any unrecognized hardware is immediately flagged as **`ALIEN`**.
-* **Ultra-Lightweight & Zero Third-Party Dependencies:** Built strictly with the Python Standard Library and native Linux networking tools. Starts instantly with a tiny memory footprint (<15 MB RAM), ideal for 24/7 background monitoring on low-power hardware like a Raspberry Pi.
-* **24/7 Sentinel Watch Mode with Webhooks:** Continuously monitors your LAN in the background and dispatches instant alert notifications to **Discord, Telegram, Slack, or generic webhooks** the moment an unauthorized device joins or an active threat is detected.
+* **Zero Third-Party Dependencies:** Built strictly with the Python standard library and standard Linux networking tools. Starts with a low memory footprint (<15 MB RAM), well suited for 24/7 background monitoring on low-power hardware like a Raspberry Pi.
+* **24/7 Sentinel Watch Mode with Webhooks:** Continuously monitors your LAN in the background and dispatches alert notifications to **Discord, Telegram, Slack, or generic webhooks** the moment an unauthorized device joins or an active threat is detected.
 
 ---
 
@@ -263,7 +263,7 @@ Alien Hunter features a modular AI provider adapter that automatically synthesiz
 
 Supported AI providers (configured via `"provider"` in `config.json`):
 * **`ollama`**: Local private inference (`qwen2.5:0.5b`, `llama3.2:1b`, etc.). Endpoint defaults to `http://localhost:11434`.
-* **`openai_compatible`**: Universal standard for [Groq](https://groq.com) (free/ultra-fast), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), DeepSeek, or LM Studio.
+* **`openai_compatible`**: Standard format for [Groq](https://groq.com), [OpenAI](https://openai.com), [OpenRouter](https://openrouter.ai), DeepSeek, or local LM Studio.
 * **`anthropic`**: Anthropic Claude API (`claude-3-5-haiku`).
 * **`gemini`**: Google Gemini REST API (`gemini-1.5-flash`).
 

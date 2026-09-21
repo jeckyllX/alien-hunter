@@ -32,7 +32,7 @@ def ensure_root():
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alien-hunter",
-        description="Alien Hunter - Advanced LAN Security Auditor & Rogue Device Hunter",
+        description="Alien Hunter - LAN Security Auditor & Rogue Device Hunter",
     )
     parser.add_argument("-v", "--version", action="version", version=f"Alien Hunter v{__version__}")
     parser.add_argument("--whitelist-file", type=str, default="", help="Custom path to known_devices.json whitelist")

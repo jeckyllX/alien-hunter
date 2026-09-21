@@ -26,7 +26,7 @@ class ConsoleReporter:
     @staticmethod
     def render_banner(version: str):
         print(f"\n{Colors.BOLD}{Colors.CYAN}========================================================================{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.CYAN}       🛸  ALIEN HUNTER v{version}: ADVANCED LAN SECURITY & ROGUE DETECTOR   {Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}       🛸  ALIEN HUNTER v{version}: LAN SECURITY AUDITOR & ROGUE DETECTOR     {Colors.RESET}")
         print(f"{Colors.BOLD}{Colors.CYAN}========================================================================{Colors.RESET}\n")
 
     @staticmethod
