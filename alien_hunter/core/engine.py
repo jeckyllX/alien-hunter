@@ -457,19 +457,26 @@ class DiscoveryEngine:
                 timeout=1.0,
             )
         )
-        # d) DNS Integrity & Cache Poisoning Audit
+        # d) Active mDNS / Bonjour Poisoning Canary Trap (Anti-Responder)
+        threats.extend(
+            ThreatDetector.check_mdns_poisoning(
+                interface=net_info.interface,
+                timeout=1.0,
+            )
+        )
+        # e) DNS Integrity & Cache Poisoning Audit
         threats.extend(
             ThreatDetector.check_dns_integrity(
                 gateway_ip=net_info.gateway_ip,
             )
         )
-        # e) Rogue IPv6 Router Advertisement & mitm6 Guard
+        # f) Rogue IPv6 Router Advertisement & mitm6 Guard
         threats.extend(
             ThreatDetector.check_rogue_ipv6_ra(
                 interface=net_info.interface,
             )
         )
-        # f) Remote Promiscuous Node Anti-Sniff Test (on deep scan)
+        # g) Remote Promiscuous Node Anti-Sniff Test (on deep scan)
         if deep_scan and active_devices:
             threats.extend(
                 ThreatDetector.check_promiscuous_hosts(
@@ -479,7 +486,7 @@ class DiscoveryEngine:
                     target_hosts=active_devices,
                 )
             )
-        # g) Wireless Airspace / Evil Twin AP
+        # h) Wireless Airspace / Evil Twin AP
         if current_ssid:
             threats.extend(ThreatDetector.check_wifi_threats(current_ssid))
 

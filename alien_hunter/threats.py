@@ -8,6 +8,7 @@ import subprocess
 from typing import Any, Dict, List, Optional
 
 from .defenses.llmnr_canary import LlmnrCanaryTrap
+from .defenses.mdns_canary import MdnsCanaryTrap
 from .defenses.dns_integrity import DnsIntegrityAuditor
 from .defenses.ipv6_guard import Ipv6Guard
 from .defenses.anti_sniff import AntiSniffDetector
@@ -233,6 +234,20 @@ class ThreatDetector:
         return LlmnrCanaryTrap.check_poisoning(
             interface=interface,
             subnet_broadcast=subnet_broadcast,
+            timeout=timeout,
+        )
+
+    @staticmethod
+    def check_mdns_poisoning(
+        interface: Optional[str] = None,
+        timeout: float = 1.0,
+    ) -> List[str]:
+        """
+        Emits canary queries over Multicast DNS (mDNS UDP 5353) to detect active
+        local name resolution poisoners (e.g. Responder / Inveigh).
+        """
+        return MdnsCanaryTrap.check_poisoning(
+            interface=interface,
             timeout=timeout,
         )
 

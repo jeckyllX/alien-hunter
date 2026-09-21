@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from alien_hunter.defenses.llmnr_canary import LlmnrCanaryTrap
+from alien_hunter.defenses.mdns_canary import MdnsCanaryTrap
 from alien_hunter.defenses.dns_integrity import DnsIntegrityAuditor
 from alien_hunter.defenses.ipv6_guard import Ipv6Guard
 from alien_hunter.defenses.anti_sniff import AntiSniffDetector
@@ -53,6 +54,79 @@ class TestLlmnrCanaryTrap(unittest.TestCase):
         self.assertTrue(len(threats) > 0)
         self.assertTrue(any("192.168.1.199" in t for t in threats))
         self.assertTrue(any("Poisoning" in t for t in threats))
+
+
+class TestMdnsCanaryTrap(unittest.TestCase):
+    """Tests mDNS / Bonjour canary query construction and poisoner detection."""
+
+    def test_build_mdns_query(self):
+        pkt = MdnsCanaryTrap.build_mdns_query("canary-test", trans_id=0x4321)
+        self.assertGreater(len(pkt), 12)
+        trans_id, flags, qdcount, ancount = struct.unpack("!HHHH", pkt[:8])
+        self.assertEqual(trans_id, 0x4321)
+        self.assertEqual(flags, 0)
+        self.assertEqual(qdcount, 1)
+        self.assertEqual(ancount, 0)
+        self.assertIn(b"canary-test", pkt)
+        self.assertIn(b"local", pkt)
+
+    def test_parse_dns_name(self):
+        encoded = b"\x03foo\x03bar\x05local\x00"
+        name, offset = MdnsCanaryTrap._parse_dns_name(encoded, 0)
+        self.assertEqual(name, "foo.bar.local")
+        self.assertEqual(offset, len(encoded))
+
+    @patch("alien_hunter.defenses.mdns_canary.create_udp_socket")
+    def test_detects_active_mdns_poisoner(self, mock_create_sock):
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+
+        canary_token = "abcd1234"
+        canary_domain = f"canary-srv-{canary_token}.local"
+        qname = MdnsCanaryTrap._encode_dns_label(canary_domain)
+
+        # Build simulated affirmative mDNS response from attacker (192.168.1.88)
+        # Header: ID 0x4321, Flags 0x8400 (Response, Authoritative), QDCOUNT 1, ANCOUNT 1, NS 0, AR 0
+        header = struct.pack("!HHHHHH", 0x4321, 0x8400, 1, 1, 0, 0)
+        question = qname + struct.pack("!HH", 1, 1)  # Type A, Class IN
+        answer = qname + struct.pack("!HHIH", 1, 1, 120, 4) + socket.inet_aton("192.168.1.88")
+        resp_data = header + question + answer
+
+        mock_sock.recvfrom.side_effect = [
+            (resp_data, ("192.168.1.88", 5353)),
+            TimeoutError(),
+        ]
+
+        with patch("os.urandom", side_effect=[bytes.fromhex(canary_token), b"\x43\x21"]):
+            threats = MdnsCanaryTrap.check_poisoning(timeout=0.1)
+
+        self.assertTrue(len(threats) > 0)
+        self.assertTrue(any("192.168.1.88" in t for t in threats))
+        self.assertTrue(any("mDNS / Bonjour Poisoning" in t for t in threats))
+        self.assertTrue(any(canary_domain in t for t in threats))
+
+    @patch("alien_hunter.defenses.mdns_canary.create_udp_socket")
+    def test_ignores_unrelated_mdns_response(self, mock_create_sock):
+        mock_sock = MagicMock()
+        mock_create_sock.return_value = mock_sock
+
+        # Unrelated Apple TV AirPlay response
+        airplay_domain = "_airplay._tcp.local"
+        qname = MdnsCanaryTrap._encode_dns_label(airplay_domain)
+        header = struct.pack("!HHHHHH", 0, 0x8400, 1, 1, 0, 0)
+        question = qname + struct.pack("!HH", 12, 1)
+        answer = qname + struct.pack("!HHIH", 12, 1, 120, 4) + b"\x01a\x00\x00"
+        resp_data = header + question + answer
+
+        mock_sock.recvfrom.side_effect = [
+            (resp_data, ("192.168.1.20", 5353)),
+            TimeoutError(),
+        ]
+
+        with patch("os.urandom", side_effect=[b"\x11\x22\x33\x44", b"\x00\x00"]):
+            threats = MdnsCanaryTrap.check_poisoning(timeout=0.1)
+
+        self.assertEqual(threats, [])
 
 
 class TestDnsIntegrityAuditor(unittest.TestCase):

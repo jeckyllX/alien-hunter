@@ -1,6 +1,7 @@
 """Defenses and Intrusion Detection Systems subpackage for Alien Hunter."""
 
 from .llmnr_canary import LlmnrCanaryTrap
+from .mdns_canary import MdnsCanaryTrap
 from .dns_integrity import DnsIntegrityAuditor
 from .ipv6_guard import Ipv6Guard
 from .anti_sniff import AntiSniffDetector
@@ -9,6 +10,7 @@ from .honey_port import HoneyPortListener, HoneyPortEvent
 
 __all__ = [
     "LlmnrCanaryTrap",
+    "MdnsCanaryTrap",
     "DnsIntegrityAuditor",
     "Ipv6Guard",
     "AntiSniffDetector",
