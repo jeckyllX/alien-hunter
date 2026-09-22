@@ -1,6 +1,6 @@
 """
 Alien Hunter
-Comprehensive LAN Security Auditor & Stealth Device Hunter
+LAN security auditor and network discovery tool
 """
 
 __version__ = "1.0.0"

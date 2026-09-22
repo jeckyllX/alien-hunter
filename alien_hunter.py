@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Alien Hunter (alien-hunter)
-Comprehensive LAN Security Auditor & Stealth Device Hunter
+LAN security auditor and network discovery tool
 
 License: MIT
 """

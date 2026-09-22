@@ -40,18 +40,18 @@ class AlertMessage:
     @property
     def title(self) -> str:
         if self.is_report:
-            return "🛸 Alien Hunter: Network Security Audit Report"
+            return "Alien Hunter: Network Security Audit Report"
         if not self.alien_devices and self.threats:
-            return "⚠️ Alien Hunter: Network Threat Alert!"
-        return "🛸 Alien Hunter: Intrusion Alert!"
+            return "Alien Hunter: Threat Alert"
+        return "Alien Hunter: Unrecognized Device Alert"
 
     @property
     def headline(self) -> str:
         if self.is_report and self.audit_result:
-            return f"📋 **Alien Hunter Audit**: {self.audit_result.total_count} Device(s) Audited on LAN"
+            return f"**Alien Hunter Audit**: {self.audit_result.total_count} device(s) on LAN"
         if not self.alien_devices and self.threats:
-            return f"⚠️ **Alien Hunter Threat**: {len(self.threats)} Active Threat(s) Detected on LAN!"
-        return f"🚨 **Alien Hunter Alert**: {self.count} Alien Device(s) Detected on LAN!"
+            return f"**Alien Hunter Threat**: {len(self.threats)} threat(s) detected on LAN"
+        return f"**Alien Hunter Alert**: {self.count} unrecognized device(s) detected on LAN"
 
     @property
     def formatted_time(self) -> str:

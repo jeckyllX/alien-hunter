@@ -24,7 +24,7 @@ PYTHON_BIN="$(command -v python3 || echo /usr/bin/python3)"
 print_banner() {
     echo -e "${BOLD}${CYAN}"
     echo "========================================================================"
-    echo "       🛸  ALIEN HUNTER: AUTOMATED INSTALLER & SYSTEMD SETUP           "
+    echo "                 Alien Hunter: Setup and Installation                   "
     echo "========================================================================"
     echo -e "${RESET}"
 }
@@ -186,7 +186,7 @@ main() {
     setup_systemd_service
 
     echo -e "\n${BOLD}${GREEN}========================================================================${RESET}"
-    echo -e "${BOLD}${GREEN}                   INSTALLATION COMPLETE SUCCESSFULLY!                  ${RESET}"
+    echo -e "${BOLD}${GREEN}                        Installation Complete                           ${RESET}"
     echo -e "${BOLD}${GREEN}========================================================================${RESET}\n"
 
     echo -e "You can now run Alien Hunter from anywhere in your terminal:"

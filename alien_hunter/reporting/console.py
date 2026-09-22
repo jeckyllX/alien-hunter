@@ -26,7 +26,7 @@ class ConsoleReporter:
     @staticmethod
     def render_banner(version: str):
         print(f"\n{Colors.BOLD}{Colors.CYAN}========================================================================{Colors.RESET}")
-        print(f"{Colors.BOLD}{Colors.CYAN}       🛸  ALIEN HUNTER v{version}: LAN SECURITY AUDITOR & ROGUE DETECTOR     {Colors.RESET}")
+        print(f"{Colors.BOLD}{Colors.CYAN}            ALIEN HUNTER v{version}: LAN SECURITY AUDITOR                {Colors.RESET}")
         print(f"{Colors.BOLD}{Colors.CYAN}========================================================================{Colors.RESET}\n")
 
     @staticmethod
@@ -83,27 +83,27 @@ class ConsoleReporter:
         print(f"Verified Trusted Devices:        {result.trusted_count}")
 
         if result.alien_devices:
-            print(f"\n{Colors.BOLD}{Colors.RED}🚨 ALERT: {result.alien_count} ALIEN / UNRECOGNIZED DEVICE(S) DETECTED!{Colors.RESET}")
+            print(f"\n{Colors.BOLD}{Colors.RED}[!] Unrecognized device(s) detected ({result.alien_count}):{Colors.RESET}")
             for a in result.alien_devices:
                 print(f"   {Colors.RED}• IP: {a.ip:<15} MAC: {a.mac} ({a.vendor}) Name: {a.display_name}{Colors.RESET}")
                 if a.ai_assessment:
                     ai = a.ai_assessment
-                    print(f"     {Colors.MAGENTA}🤖 AI Risk: [{ai.risk_level}] {ai.summary}{Colors.RESET}")
-                    print(f"     {Colors.MAGENTA}   Action: {ai.whitelist_recommendation} ({ai.action_advice}){Colors.RESET}")
+                    print(f"     {Colors.MAGENTA}AI Risk: [{ai.risk_level}] {ai.summary}{Colors.RESET}")
+                    print(f"     {Colors.MAGENTA}Action: {ai.whitelist_recommendation} ({ai.action_advice}){Colors.RESET}")
         else:
-            print(f"\n{Colors.BOLD}{Colors.GREEN}✅ NO ALIEN DEVICES DETECTED. All active devices match your trusted whitelist.{Colors.RESET}")
+            print(f"\n{Colors.BOLD}{Colors.GREEN}[✓] All active devices match whitelist.{Colors.RESET}")
 
         if result.threats:
-            print(f"\n{Colors.BOLD}{Colors.YELLOW}⚠️  POTENTIAL SECURITY THREATS DETECTED ({len(result.threats)}):{Colors.RESET}")
+            print(f"\n{Colors.BOLD}{Colors.YELLOW}[!] Potential security threats detected ({len(result.threats)}):{Colors.RESET}")
             for th in result.threats:
                 print(f"   {Colors.YELLOW}• {th}{Colors.RESET}")
         else:
-            print(f"{Colors.GREEN}✅ No critical service vulnerabilities or ARP/Wi-Fi spoofing detected.{Colors.RESET}")
+            print(f"{Colors.GREEN}[✓] No critical service vulnerabilities or spoofing detected.{Colors.RESET}")
 
         if result.ai_posture:
             ap = result.ai_posture
             color = Colors.GREEN if ap.posture == "SECURE" else (Colors.RED if ap.posture == "CRITICAL" else Colors.YELLOW)
-            print(f"\n{Colors.BOLD}{color}🤖 AI NETWORK SECURITY POSTURE: [{ap.posture}]{Colors.RESET}")
+            print(f"\n{Colors.BOLD}{color}AI Network Posture: [{ap.posture}]{Colors.RESET}")
             print(f"   {color}{ap.summary}{Colors.RESET}")
             if ap.threats_found:
                 print(f"   {Colors.YELLOW}Threats Highlighted:{Colors.RESET}")

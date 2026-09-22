@@ -88,7 +88,7 @@ class SentinelWatchdog:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
-                                f"\n{Colors.BOLD}{Colors.RED}[{timestamp}] 🚨 ALIEN INTRUSION DETECTED!{Colors.RESET}"
+                                f"\n{Colors.BOLD}{Colors.RED}[{timestamp}] [!] Unrecognized device(s) detected:{Colors.RESET}"
                             )
                             for a in new_aliens:
                                 print(

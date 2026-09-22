@@ -1,7 +1,7 @@
 """
 Passive Layer-2 Frame Sniffer.
-Listens for raw Ethernet frames crossing the local link to detect stealth devices,
-misconfigured hosts, or rogue hardware transmitting with static out-of-subnet IPs.
+Listens for raw Ethernet frames crossing the local link to detect unprompted transmissions,
+misconfigured hosts, or static out-of-subnet IPs.
 """
 
 import ipaddress
