@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from alien_hunter.scanners.sniffer import PassiveFrameSniffer
 from alien_hunter.scanners.ssdp import SsdpScanner
 from alien_hunter.scanners.netbios import NetbiosScanner
+from alien_hunter.scanners.arp import ArpScanner, NativeArpSweeper
 from alien_hunter.threats import ThreatDetector
 
 
@@ -193,6 +194,52 @@ class TestThreatDetectorRogueDhcp(unittest.TestCase):
             )
 
         self.assertEqual(threats, [])
+
+
+class TestNativeArpSweeper(unittest.TestCase):
+    """Tests pure Python raw AF_PACKET ARP broadcast scanning."""
+
+    @patch("socket.socket")
+    @patch("select.select")
+    def test_native_arp_sweep_receives_replies(self, mock_select, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+
+        def fake_select(r, w, x, timeout=0):
+            import time
+            time.sleep(0.06)
+            return ([mock_sock], [], [])
+
+        mock_select.side_effect = fake_select
+
+        # Simulated incoming ARP reply from 192.168.1.50 (AA:BB:CC:DD:EE:11)
+        target_mac = bytes.fromhex("AABBCCDDEE11")
+        target_ip = bytes([192, 168, 1, 50])
+        local_mac = bytes.fromhex("001122334455")
+        local_ip = bytes([192, 168, 1, 10])
+
+        eth_hdr = local_mac + target_mac + struct.pack("!H", 0x0806)
+        arp_reply = struct.pack(
+            "!HHBBH6s4s6s4s",
+            1, 0x0800, 6, 4, 2,  # Opcode 2 = Reply
+            target_mac, target_ip,
+            local_mac, local_ip,
+        )
+        resp_pkt = eth_hdr + arp_reply
+
+        mock_sock.recvfrom.side_effect = [(resp_pkt, ("wlan0", 0))] + [BlockingIOError()] * 10
+
+        devices = NativeArpSweeper.sweep(
+            interface="wlan0",
+            local_mac="00:11:22:33:44:55",
+            local_ip="192.168.1.10",
+            subnet_cidr="192.168.1.0/24",
+            timeout=0.05,
+        )
+
+        self.assertIn("192.168.1.50", devices)
+        self.assertEqual(devices["192.168.1.50"], "AA:BB:CC:DD:EE:11")
+        mock_sock.close.assert_called()
 
 
 if __name__ == "__main__":

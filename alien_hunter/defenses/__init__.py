@@ -7,6 +7,7 @@ from .ipv6_guard import Ipv6Guard
 from .anti_sniff import AntiSniffDetector
 from .port_drift import PortDriftTracker
 from .honey_port import HoneyPortListener, HoneyPortEvent
+from .honey_auth import HoneyAuthTrap
 
 __all__ = [
     "LlmnrCanaryTrap",
@@ -17,4 +18,5 @@ __all__ = [
     "PortDriftTracker",
     "HoneyPortListener",
     "HoneyPortEvent",
+    "HoneyAuthTrap",
 ]

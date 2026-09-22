@@ -16,6 +16,7 @@ from alien_hunter.defenses.ipv6_guard import Ipv6Guard
 from alien_hunter.defenses.anti_sniff import AntiSniffDetector
 from alien_hunter.defenses.port_drift import PortDriftTracker
 from alien_hunter.defenses.honey_port import HoneyPortListener, HoneyPortEvent
+from alien_hunter.defenses.honey_auth import HoneyAuthTrap
 
 
 class TestLlmnrCanaryTrap(unittest.TestCase):
@@ -239,6 +240,35 @@ class TestHoneyPortListener(unittest.TestCase):
         self.assertTrue(len(threats) > 0)
         self.assertTrue(any(str(test_port) in t for t in threats))
         self.assertTrue(any("Honey-Port Canary Triggered" in t for t in threats))
+
+
+class TestHoneyAuthTrap(unittest.TestCase):
+    """Tests decoy honeypot payload and authentication handshake inspection."""
+
+    def test_inspect_http_payload_extracts_user_agent_and_basic_auth(self):
+        mock_conn = MagicMock()
+        # Simulated basic auth: admin:password123 -> base64 YWRtaW46cGFzc3dvcmQxMjM=
+        payload = (
+            b"GET /admin/config HTTP/1.1\r\n"
+            b"Host: 192.168.1.10\r\n"
+            b"User-Agent: Nikto/2.1.6\r\n"
+            b"Authorization: Basic YWRtaW46cGFzc3dvcmQxMjM=\r\n\r\n"
+        )
+        mock_conn.recv.return_value = payload
+
+        meta = HoneyAuthTrap.inspect_connection(mock_conn, dest_port=8080)
+        self.assertEqual(meta["payload_snippet"], "GET /admin/config HTTP/1.1")
+        self.assertEqual(meta["tooling"], "Nikto/2.1.6")
+        self.assertEqual(meta["credentials"], "admin:password123")
+
+    def test_inspect_smb_dialect_probe(self):
+        mock_conn = MagicMock()
+        payload = b"\x00\x00\x00\x45\xffSMBs\x00\x00\x00\x00"
+        mock_conn.recv.return_value = payload
+
+        meta = HoneyAuthTrap.inspect_connection(mock_conn, dest_port=445)
+        self.assertEqual(meta["tooling"], "SMB Dialect Probe")
+        self.assertEqual(meta["payload_snippet"], "SMB Negotiation Request")
 
 
 if __name__ == "__main__":

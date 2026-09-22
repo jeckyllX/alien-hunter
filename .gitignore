@@ -2,6 +2,7 @@
 known_devices.json
 config.json
 TODO.md
+AGENTS.md
 *.json.local
 
 # Python cache & logs

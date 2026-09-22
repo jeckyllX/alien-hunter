@@ -373,7 +373,12 @@ class DiscoveryEngine:
             return AuditResult(timestamp=time.time(), network=net_info)
 
         # 1. Active Layer-2 ARP scan
-        arp_scanner = ArpScanner(net_info.interface)
+        arp_scanner = ArpScanner(
+            interface=net_info.interface,
+            local_mac=net_info.local_mac,
+            local_ip=net_info.local_ip,
+            subnet_cidr=net_info.subnet_cidr,
+        )
         active_devices = arp_scanner.scan()
 
         # 2. Gateway DNS lease audit (sleeping & firewalled devices)

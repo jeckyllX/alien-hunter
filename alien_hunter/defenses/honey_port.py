@@ -11,19 +11,42 @@ import time
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
 
+from .honey_auth import HoneyAuthTrap
+
+
 class HoneyPortEvent:
     """Represents a connection attempt against a decoy honey-port."""
 
-    def __init__(self, src_ip: str, src_port: int, dest_port: int, timestamp: float):
+    def __init__(
+        self,
+        src_ip: str,
+        src_port: int,
+        dest_port: int,
+        timestamp: float,
+        payload_snippet: str = "",
+        tooling: str = "",
+        credentials: str = "",
+    ):
         self.src_ip = src_ip
         self.src_port = src_port
         self.dest_port = dest_port
         self.timestamp = timestamp
+        self.payload_snippet = payload_snippet
+        self.tooling = tooling
+        self.credentials = credentials
 
     def to_threat_string(self) -> str:
+        details = []
+        if self.tooling:
+            details.append(f"Tooling: {self.tooling}")
+        if self.payload_snippet:
+            details.append(f"Payload: {self.payload_snippet}")
+        if self.credentials:
+            details.append(f"Attempted Credentials: {self.credentials}")
+        detail_str = f" [{', '.join(details)}]" if details else ""
         return (
             f"CRITICAL: Honey-Port Canary Triggered! Host at {self.src_ip} (port {self.src_port}) "
-            f"attempted connection to decoy honeypot port {self.dest_port}! "
+            f"attempted connection to decoy honeypot port {self.dest_port}!{detail_str} "
             f"Active internal reconnaissance, lateral movement, or worm scanning detected!"
         )
 
@@ -107,13 +130,20 @@ class HoneyPortListener:
                         conn, addr = s.accept()
                         src_ip, src_port = addr[0], addr[1]
                         dest_port = s.getsockname()[1]
-                        conn.close()  # Immediately drop connection
+                        meta = HoneyAuthTrap.inspect_connection(conn, dest_port)
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
 
                         event = HoneyPortEvent(
                             src_ip=src_ip,
                             src_port=src_port,
                             dest_port=dest_port,
                             timestamp=time.time(),
+                            payload_snippet=meta.get("payload_snippet", ""),
+                            tooling=meta.get("tooling", ""),
+                            credentials=meta.get("credentials", ""),
                         )
 
                         with self._lock:
