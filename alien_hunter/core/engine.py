@@ -506,6 +506,17 @@ class DiscoveryEngine:
             )
         )
 
+        # j) High-Entropy DNS Tunneling & Exfiltration Detector
+        threats.extend(
+            ThreatDetector.check_dns_tunneling(
+                interface=net_info.interface,
+                subnet_cidr=net_info.subnet_cidr,
+                local_ip=net_info.local_ip,
+                local_mac=net_info.local_mac,
+                duration=1.0,
+            )
+        )
+
         inventory: List[Device] = []
         alien_devices: List[Device] = []
 

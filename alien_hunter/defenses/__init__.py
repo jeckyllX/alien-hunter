@@ -9,6 +9,7 @@ from .port_drift import PortDriftTracker
 from .honey_port import HoneyPortListener, HoneyPortEvent
 from .honey_auth import HoneyAuthTrap
 from .syn_scan import SynScanDetector, SynScanEvent
+from .dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
 
 __all__ = [
     "LlmnrCanaryTrap",
@@ -22,4 +23,6 @@ __all__ = [
     "HoneyAuthTrap",
     "SynScanDetector",
     "SynScanEvent",
+    "DnsTunnelingDetector",
+    "DnsTunnelingEvent",
 ]

@@ -9,7 +9,8 @@
     "port_drift_enabled": true,
     "honey_port_enabled": true,
     "honey_ports": [5555, 2323, 8888],
-    "syn_scan_enabled": true
+    "syn_scan_enabled": true,
+    "dns_tunneling_enabled": true
   },
   "ai_analysis": {
     "enabled": false,

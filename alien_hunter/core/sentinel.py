@@ -10,6 +10,7 @@ from ..notifications.engine import NotificationEngine
 from ..config import ConfigManager
 from ..defenses.honey_port import HoneyPortListener
 from ..defenses.syn_scan import SynScanDetector
+from ..defenses.dns_tunneling import DnsTunnelingDetector
 from .engine import DiscoveryEngine
 
 
@@ -28,6 +29,7 @@ class SentinelWatchdog:
         ai_engine: Optional[Any] = None,
         honey_ports: Optional[List[int]] = None,
         syn_scan_enabled: bool = True,
+        dns_tunneling_enabled: bool = True,
     ):
         self.engine = engine
         self.notifier = notifier
@@ -42,6 +44,8 @@ class SentinelWatchdog:
         self.honey_listener: Optional[HoneyPortListener] = None
         self.syn_scan_enabled = syn_scan_enabled
         self.syn_detector: Optional[SynScanDetector] = None
+        self.dns_tunneling_enabled = dns_tunneling_enabled
+        self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -63,6 +67,11 @@ class SentinelWatchdog:
             self.syn_detector = SynScanDetector(interface=self.interface)
             if self.syn_detector.start():
                 print(f"{Colors.GREEN}[+] Stealth TCP SYN Scan Detector active.{Colors.RESET}")
+
+        if self.dns_tunneling_enabled:
+            self.dns_tunnel_detector = DnsTunnelingDetector(interface=self.interface)
+            if self.dns_tunnel_detector.start():
+                print(f"{Colors.GREEN}[+] High-Entropy DNS Tunneling Detector active.{Colors.RESET}")
 
         try:
             while True:
@@ -94,12 +103,18 @@ class SentinelWatchdog:
                         for st in syn_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {st}{Colors.RESET}")
 
-                    combined_threats = result.threats + honey_threats + syn_threats
+                    # Check for high-entropy DNS tunneling & exfiltration
+                    dns_threats = self.dns_tunnel_detector.get_threat_strings() if self.dns_tunnel_detector else []
+                    if dns_threats:
+                        for dt in dns_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {dt}{Colors.RESET}")
+
+                    combined_threats = result.threats + honey_threats + syn_threats + dns_threats
                     new_aliens = [
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats:
+                    if new_aliens or honey_threats or syn_threats or dns_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
@@ -136,3 +151,5 @@ class SentinelWatchdog:
                 self.honey_listener.stop()
             if self.syn_detector:
                 self.syn_detector.stop()
+            if self.dns_tunnel_detector:
+                self.dns_tunnel_detector.stop()

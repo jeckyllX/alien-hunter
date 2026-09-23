@@ -18,6 +18,7 @@ from alien_hunter.defenses.port_drift import PortDriftTracker
 from alien_hunter.defenses.honey_port import HoneyPortListener, HoneyPortEvent
 from alien_hunter.defenses.honey_auth import HoneyAuthTrap
 from alien_hunter.defenses.syn_scan import SynScanDetector, SynScanEvent
+from alien_hunter.defenses.dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
 
 
 class TestLlmnrCanaryTrap(unittest.TestCase):
@@ -386,6 +387,136 @@ class TestSynScanDetector(unittest.TestCase):
     def test_sniff_handles_permission_error_gracefully(self, mock_socket_cls):
         mock_socket_cls.side_effect = PermissionError("Operation not permitted")
         detector = SynScanDetector(interface="eth0")
+        events = detector.sniff(duration=0.1)
+        self.assertEqual(events, [])
+
+
+class TestDnsTunnelingDetector(unittest.TestCase):
+    """Tests high-entropy DNS tunneling and covert exfiltration detection."""
+
+    @staticmethod
+    def _make_dns_pkt(
+        src_ip: str,
+        dst_ip: str,
+        domain: str,
+        qtype: int = 1,
+        src_mac: str = "AA:BB:CC:DD:EE:FF",
+    ) -> bytes:
+        dst_mac_bytes = b"\x00\x11\x22\x33\x44\x55"
+        src_mac_bytes = bytes.fromhex(src_mac.replace(":", ""))
+        eth_hdr = dst_mac_bytes + src_mac_bytes + struct.pack("!H", 0x0800)
+
+        hdr = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+        qname = bytearray()
+        for part in domain.split("."):
+            b = part.encode("utf-8")
+            qname.append(len(b))
+            qname.extend(b)
+        qname.append(0)
+        qtail = struct.pack("!HH", qtype, 1)
+        dns_body = hdr + bytes(qname) + qtail
+
+        udp_len = 8 + len(dns_body)
+        udp_hdr = struct.pack("!HHHH", 54321, 53, udp_len, 0)
+
+        ip_len = 20 + udp_len
+        s_ip = socket.inet_aton(src_ip)
+        d_ip = socket.inet_aton(dst_ip)
+        ip_hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, ip_len, 1234, 0, 64, 17, 0, s_ip, d_ip)
+        return eth_hdr + ip_hdr + udp_hdr + dns_body
+
+    def test_calculate_shannon_entropy(self):
+        self.assertEqual(DnsTunnelingDetector.calculate_shannon_entropy(""), 0.0)
+        self.assertEqual(DnsTunnelingDetector.calculate_shannon_entropy("aaaaaaa"), 0.0)
+        # Normal dictionary words have low entropy
+        self.assertLess(DnsTunnelingDetector.calculate_shannon_entropy("google"), 2.5)
+        # Random hex / base32 strings have high entropy
+        self.assertGreater(
+            DnsTunnelingDetector.calculate_shannon_entropy("a8f9c2d1e0b54321fedcba098765432101234567"),
+            3.8,
+        )
+
+    def test_parse_dns_packet(self):
+        pkt = self._make_dns_pkt("192.168.1.50", "8.8.8.8", "api.example.com", qtype=1)
+        parsed = DnsTunnelingDetector.parse_dns_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["src_ip"], "192.168.1.50")
+        self.assertEqual(parsed["query_domain"], "api.example.com")
+        self.assertEqual(parsed["longest_label"], "example")
+        self.assertEqual(parsed["qtype"], 1)
+
+        # Truncated packet
+        self.assertIsNone(DnsTunnelingDetector.parse_dns_packet(pkt[:40]))
+
+        # Non-DNS packet (e.g. TCP port 80)
+        tcp_pkt = pkt[:23] + b"\x06" + pkt[24:]
+        self.assertIsNone(DnsTunnelingDetector.parse_dns_packet(tcp_pkt))
+
+    def test_detect_high_entropy_dns_tunnel(self):
+        detector = DnsTunnelingDetector()
+        tunnel_domain = "a8f9c2d1e0b54321fedcba098765432101234567.c2.attacker.com"
+        pkt = self._make_dns_pkt("192.168.1.100", "8.8.8.8", tunnel_domain, qtype=1)
+
+        event = detector.process_packet(pkt)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.src_ip, "192.168.1.100")
+        self.assertEqual(event.longest_label, "a8f9c2d1e0b54321fedcba098765432101234567")
+        self.assertGreaterEqual(event.entropy, 3.8)
+        self.assertEqual(event.qtype_name, "A")
+        self.assertIn("High-Entropy DNS Tunneling / Exfiltration detected!", event.to_threat_string())
+        self.assertIn("MITRE ATT&CK T1071.004", event.to_threat_string())
+
+    def test_detect_txt_or_null_record_tunnel(self):
+        detector = DnsTunnelingDetector()
+        # TXT record (QTYPE 16) with length 26 and entropy > 3.6
+        tunnel_domain = "k54f2g8b19x83m01zpq928cb4a.c2.net"
+        pkt = self._make_dns_pkt("192.168.1.105", "1.1.1.1", tunnel_domain, qtype=16)
+
+        event = detector.process_packet(pkt)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.qtype_name, "TXT")
+        self.assertIn("QType: TXT", event.to_threat_string())
+
+    def test_whitelist_filtering(self):
+        detector = DnsTunnelingDetector()
+
+        # Reverse DNS pointer query
+        ptr_pkt = self._make_dns_pkt("192.168.1.100", "8.8.8.8", "1.1.168.192.in-addr.arpa", qtype=12)
+        self.assertIsNone(detector.process_packet(ptr_pkt))
+
+        # Legitimate cloud CDN suffix
+        cdn_domain = "d3g9o9273j5189a8f9c2d1e0b54321fedcba.cloudfront.net"
+        cdn_pkt = self._make_dns_pkt("192.168.1.100", "8.8.8.8", cdn_domain, qtype=1)
+        self.assertIsNone(detector.process_packet(cdn_pkt))
+
+    def test_burst_detection(self):
+        detector = DnsTunnelingDetector(
+            burst_threshold=3,
+            length_threshold=28,
+            entropy_threshold=3.7,
+        )
+
+        # Send 3 distinct queries with length >= 28 and entropy >= 3.7
+        domains = [
+            "c2-data-chunk-01-a8f9c2d1e0b54.attacker.com",
+            "c2-data-chunk-02-a8f9c2d1e0b55.attacker.com",
+            "c2-data-chunk-03-a8f9c2d1e0b56.attacker.com",
+        ]
+
+        event = None
+        for d in domains:
+            pkt = self._make_dns_pkt("192.168.1.110", "8.8.8.8", d, qtype=1)
+            ev = detector.process_packet(pkt)
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.query_count, 3)
+
+    @patch("socket.socket")
+    def test_sniff_handles_permission_error_gracefully(self, mock_socket_cls):
+        mock_socket_cls.side_effect = PermissionError("Operation not permitted")
+        detector = DnsTunnelingDetector(interface="eth0")
         events = detector.sniff(duration=0.1)
         self.assertEqual(events, [])
 

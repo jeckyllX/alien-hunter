@@ -14,6 +14,7 @@ from .defenses.ipv6_guard import Ipv6Guard
 from .defenses.anti_sniff import AntiSniffDetector
 from .defenses.port_drift import PortDriftTracker
 from .defenses.syn_scan import SynScanDetector
+from .defenses.dns_tunneling import DnsTunnelingDetector
 
 
 class ThreatDetector:
@@ -340,4 +341,25 @@ class ThreatDetector:
         )
         events = detector.sniff(duration=duration)
         return [e.to_threat_string() for e in events]
+
+    @staticmethod
+    def check_dns_tunneling(
+        interface: Optional[str] = None,
+        subnet_cidr: Optional[str] = None,
+        local_ip: Optional[str] = None,
+        local_mac: Optional[str] = None,
+        duration: float = 1.0,
+    ) -> List[str]:
+        """
+        Passively sniffs UDP 53 DNS traffic to detect high-entropy tunneling and C2 exfiltration.
+        """
+        detector = DnsTunnelingDetector(
+            interface=interface,
+            subnet_cidr=subnet_cidr,
+            local_ip=local_ip,
+            local_mac=local_mac,
+        )
+        events = detector.sniff(duration=duration)
+        return [e.to_threat_string() for e in events]
+
 
