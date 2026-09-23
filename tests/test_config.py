@@ -65,6 +65,46 @@ class TestConfigManager(unittest.TestCase):
         self.assertEqual(entry["ports"], ["80/HTTP", "443/HTTPS"])
         self.assertIn("T", entry["last_seen"])  # ISO-8601 UTC timestamp format
 
+    def test_cli_no_sync_db_flag(self):
+        from alien_hunter.cli import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(["--no-sync-db"])
+        self.assertTrue(args.no_sync_db)
+        self.assertFalse(args.sync_db)
+
+        args_sync = parser.parse_args(["--sync-db"])
+        self.assertTrue(args_sync.sync_db)
+        self.assertFalse(args_sync.no_sync_db)
+
+        default_args = parser.parse_args([])
+        self.assertFalse(default_args.no_sync_db)
+        self.assertFalse(default_args.sync_db)
+
+    def test_sentinel_sync_db_parameter(self):
+        from alien_hunter.core.sentinel import SentinelWatchdog
+
+        sentinel_default = SentinelWatchdog(
+            engine=None,
+            notifier=None,
+            config_mgr=self.config_mgr,
+            whitelist_path=self.whitelist_file,
+            syn_scan_enabled=False,
+            dns_tunneling_enabled=False,
+        )
+        self.assertTrue(sentinel_default.sync_db)
+
+        sentinel_no_sync = SentinelWatchdog(
+            engine=None,
+            notifier=None,
+            config_mgr=self.config_mgr,
+            whitelist_path=self.whitelist_file,
+            syn_scan_enabled=False,
+            dns_tunneling_enabled=False,
+            sync_db=False,
+        )
+        self.assertFalse(sentinel_no_sync.sync_db)
+
 
 if __name__ == "__main__":
     unittest.main()

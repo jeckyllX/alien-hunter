@@ -17,7 +17,7 @@ Standard ICMP ping sweeps often miss active devices on local networks due to:
 ## Capabilities
 
 ### Network Discovery
-* **Layer-2 ARP Probing:** Emits ARP requests to map IP addresses to physical MAC addresses directly at the data link layer.
+* **Layer-2 ARP Probing:** Emits ARP requests via native `AF_PACKET` raw sockets (with fallback to `arp-scan` and `/proc/net/arp`) to map IP addresses to physical MAC addresses directly at the data link layer.
 * **Reverse DNS Lookups:** Queries the gateway DNS resolver (`UDP 53`) for PTR records to discover DHCP-assigned hostnames.
 * **Multicast DNS (mDNS):** Queries `224.0.0.251:5353` for service advertisements (AirPlay, Cast, HTTP, etc.).
 * **WS-Discovery:** Probes UDP 3702 (`239.255.255.250`) to locate Windows endpoints and ONVIF-compatible devices.
@@ -29,7 +29,9 @@ Standard ICMP ping sweeps often miss active devices on local networks due to:
 * **Name Resolution Poisoning Canary:** Broadcasts canary queries for non-existent hostnames across LLMNR (`UDP 5355`), NetBIOS-NS (`UDP 137`), and mDNS (`UDP 5353`). Any affirmative response detects active poisoners (e.g., Responder, Inveigh).
 * **Rogue IPv6 Router Detection:** Monitors `ff02::1` for rogue ICMPv6 Router Advertisements (Type 134) and unauthorized RDNSS assignments (e.g., `mitm6`).
 * **DNS Integrity Verification:** Compares gateway DNS resolution against upstream resolvers (Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`) to identify spoofed private IPs or NXDOMAIN hijacking.
-* **Decoy Honey-Ports:** Binds non-blocking TCP listeners to configurable decoy ports (e.g., 23, 5555) to detect internal port scans.
+* **Decoy Honey-Ports & Auth Traps:** Binds non-blocking TCP listeners and service banner emulators (HTTP, FTP, Telnet) to configurable decoy ports (e.g., 2323, 5555, 8888) to detect internal port scans and capture brute-force credentials.
+* **Stealth TCP SYN Scan Detection:** Captures raw IPv4 TCP frames to detect half-open SYN port sweeps across closed or unallocated ports (e.g., `nmap -sS`, `masscan`).
+* **High-Entropy DNS Tunneling Detection:** Analyzes DNS queries on the local interface for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`).
 * **Port Drift Tracking:** Compares open TCP ports against baseline records in `known_devices.json` to flag newly exposed services.
 * **Promiscuous Mode Detection:** Sends non-broadcast unicast ARP probes to identify interfaces operating in promiscuous capture mode.
 * **DHCP Verification:** Probes UDP 67/68 to verify active DHCP servers and detect unauthorized gateway offers.
@@ -82,10 +84,13 @@ alien_hunter/
 │   ├── ipv6_guard.py     # ICMPv6 RA and RDNSS inspector
 │   ├── dns_integrity.py  # DNS integrity and cache poisoning auditor
 │   ├── honey_port.py     # TCP decoy listener
+│   ├── honey_auth.py     # Emulated authentication traps (HTTP, FTP, Telnet)
+│   ├── syn_scan.py       # Raw socket TCP SYN port scan detector
+│   ├── dns_tunneling.py  # Shannon entropy and DNS exfiltration detector
 │   ├── port_drift.py     # Baseline port comparison
 │   └── anti_sniff.py     # Promiscuous interface detection
 ├── scanners/             # Active and passive network discovery modules
-│   ├── arp.py            # ARP discovery via arp-scan and neighbor tables
+│   ├── arp.py            # Layer-2 ARP sweeper (AF_PACKET raw sockets & fallback)
 │   ├── mdns.py           # mDNS discovery scanner
 │   ├── ws_discovery.py   # WS-Discovery probe scanner
 │   ├── netbios.py        # NetBIOS Name Service scanner
@@ -192,7 +197,16 @@ Example schema:
   "poll_interval_seconds": 300,
   "deep_scan_on_alert": true,
   "auto_sync_database": true,
-  "honey_ports": [23, 5555],
+  "defenses": {
+    "llmnr_canary_enabled": true,
+    "dns_integrity_enabled": true,
+    "ipv6_guard_enabled": true,
+    "port_drift_enabled": true,
+    "honey_port_enabled": true,
+    "honey_ports": [5555, 2323, 8888],
+    "syn_scan_enabled": true,
+    "dns_tunneling_enabled": true
+  },
   "notifications": {
     "telegram": {
       "enabled": true,

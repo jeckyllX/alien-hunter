@@ -46,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-notify", action="store_true", help="Send a simulated test alert through configured notification hooks")
     parser.add_argument("--notify", action="store_true", help="Dispatch scan findings & AI posture notification even if no alien devices are found")
     parser.add_argument("--sync-db", action="store_true", help="Sync observed device telemetry (aliases, discovery methods, ports, services) into known_devices.json")
+    parser.add_argument("--no-sync-db", action="store_true", help="Disable automated database updates")
     parser.add_argument("--ai", action="store_true", help="Enable AI device profiling and risk assessment")
     parser.add_argument("--no-ai", action="store_true", help="Disable AI device profiling")
     parser.add_argument("--test-ai", action="store_true", help="Test the configured AI provider with a simulated alien device")
@@ -172,6 +173,8 @@ def main():
         return
 
 
+    should_sync = (args.sync_db or config.get("auto_sync_database", True)) and not args.no_sync_db
+
     if args.watch:
         defenses_cfg = config.get("defenses", {})
         honey_ports = defenses_cfg.get("honey_ports", [5555, 2323, 8888]) if defenses_cfg.get("honey_port_enabled", True) else None
@@ -189,6 +192,7 @@ def main():
             honey_ports=honey_ports,
             syn_scan_enabled=syn_scan_enabled,
             dns_tunneling_enabled=dns_tunneling_enabled,
+            sync_db=should_sync,
         )
         sentinel.start()
         return
@@ -208,7 +212,7 @@ def main():
     )
 
     # Automatically persist observed metadata (aliases, discovery methods, services, ports) into known_devices.json
-    if args.sync_db or config.get("auto_sync_database", True):
+    if should_sync:
         config_mgr.sync_device_inventory(
             result.devices,
             whitelist_path,

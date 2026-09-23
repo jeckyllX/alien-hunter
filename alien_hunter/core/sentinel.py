@@ -30,6 +30,7 @@ class SentinelWatchdog:
         honey_ports: Optional[List[int]] = None,
         syn_scan_enabled: bool = True,
         dns_tunneling_enabled: bool = True,
+        sync_db: bool = True,
     ):
         self.engine = engine
         self.notifier = notifier
@@ -46,6 +47,7 @@ class SentinelWatchdog:
         self.syn_detector: Optional[SynScanDetector] = None
         self.dns_tunneling_enabled = dns_tunneling_enabled
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
+        self.sync_db = sync_db
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -85,11 +87,12 @@ class SentinelWatchdog:
                         interface=self.interface,
                         ai_engine=self.ai_engine,
                     )
-                    self.config_mgr.sync_device_inventory(
-                        result.devices,
-                        self.whitelist_path,
-                        subnet_cidr=result.network.subnet_cidr if result.network else None,
-                    )
+                    if self.sync_db:
+                        self.config_mgr.sync_device_inventory(
+                            result.devices,
+                            self.whitelist_path,
+                            subnet_cidr=result.network.subnet_cidr if result.network else None,
+                        )
 
                     # Check for honeypot intrusions
                     honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []
