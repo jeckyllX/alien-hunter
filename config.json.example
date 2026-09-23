@@ -11,7 +11,8 @@
     "honey_ports": [5555, 2323, 8888],
     "syn_scan_enabled": true,
     "dns_tunneling_enabled": true,
-    "dhcp_starvation_enabled": true
+    "dhcp_starvation_enabled": true,
+    "arp_poison_enabled": true
   },
   "ai_analysis": {
     "enabled": false,

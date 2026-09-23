@@ -12,6 +12,7 @@ from ..defenses.honey_port import HoneyPortListener
 from ..defenses.syn_scan import SynScanDetector
 from ..defenses.dns_tunneling import DnsTunnelingDetector
 from ..defenses.dhcp_starvation import DhcpStarvationGuard
+from ..defenses.arp_poison import ArpPoisonGuard
 from .engine import DiscoveryEngine
 
 
@@ -32,6 +33,7 @@ class SentinelWatchdog:
         syn_scan_enabled: bool = True,
         dns_tunneling_enabled: bool = True,
         dhcp_starvation_enabled: bool = True,
+        arp_poison_enabled: bool = True,
         sync_db: bool = True,
     ):
         self.engine = engine
@@ -51,6 +53,8 @@ class SentinelWatchdog:
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
         self.dhcp_starvation_enabled = dhcp_starvation_enabled
         self.dhcp_guard: Optional[DhcpStarvationGuard] = None
+        self.arp_poison_enabled = arp_poison_enabled
+        self.arp_guard: Optional[ArpPoisonGuard] = None
         self.sync_db = sync_db
 
     def start(self):
@@ -84,6 +88,11 @@ class SentinelWatchdog:
             if self.dhcp_guard.start():
                 print(f"{Colors.GREEN}[+] DHCP Starvation & Pool Exhaustion Guard active.{Colors.RESET}")
 
+        if self.arp_poison_enabled:
+            self.arp_guard = ArpPoisonGuard(interface=self.interface)
+            if self.arp_guard.start():
+                print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning & Gateway Masquerade Guard active.{Colors.RESET}")
+
         try:
             while True:
                 try:
@@ -101,6 +110,17 @@ class SentinelWatchdog:
                             result.devices,
                             self.whitelist_path,
                             subnet_cidr=result.network.subnet_cidr if result.network else None,
+                        )
+
+                    # Update ARP guard topology baseline
+                    if self.arp_guard and result.network:
+                        trusted_map = {
+                            d.ip: d.mac for d in result.devices if d.mac and d.trusted
+                        }
+                        self.arp_guard.update_topology(
+                            gateway_ip=result.network.gateway_ip,
+                            gateway_mac=result.network.gateway_mac,
+                            trusted_ip_mac_map=trusted_map,
                         )
 
                     # Check for honeypot intrusions
@@ -127,12 +147,25 @@ class SentinelWatchdog:
                         for dht in dhcp_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {dht}{Colors.RESET}")
 
-                    combined_threats = result.threats + honey_threats + syn_threats + dns_threats + dhcp_threats
+                    # Check for real-time ARP cache poisoning
+                    arp_threats = self.arp_guard.get_threat_strings() if self.arp_guard else []
+                    if arp_threats:
+                        for at in arp_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {at}{Colors.RESET}")
+
+                    combined_threats = (
+                        result.threats
+                        + honey_threats
+                        + syn_threats
+                        + dns_threats
+                        + dhcp_threats
+                        + arp_threats
+                    )
                     new_aliens = [
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats:
+                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
@@ -173,3 +206,5 @@ class SentinelWatchdog:
                 self.dns_tunnel_detector.stop()
             if self.dhcp_guard:
                 self.dhcp_guard.stop()
+            if self.arp_guard:
+                self.arp_guard.stop()

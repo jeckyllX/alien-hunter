@@ -16,6 +16,7 @@ from .defenses.port_drift import PortDriftTracker
 from .defenses.syn_scan import SynScanDetector
 from .defenses.dns_tunneling import DnsTunnelingDetector
 from .defenses.dhcp_starvation import DhcpStarvationGuard
+from .defenses.arp_poison import ArpPoisonGuard
 
 
 class ThreatDetector:
@@ -372,6 +373,26 @@ class ThreatDetector:
         Passively sniffs UDP 67/68 traffic to detect DHCP starvation and pool exhaustion attacks.
         """
         guard = DhcpStarvationGuard(interface=interface)
+        events = guard.sniff(duration=duration)
+        return [e.to_threat_string() for e in events]
+
+    @staticmethod
+    def check_realtime_arp_poisoning(
+        interface: Optional[str] = None,
+        gateway_ip: Optional[str] = None,
+        gateway_mac: Optional[str] = None,
+        trusted_ip_mac_map: Optional[Dict[str, str]] = None,
+        duration: float = 1.0,
+    ) -> List[str]:
+        """
+        Passively sniffs raw Layer-2 ARP traffic to detect active ARP cache poisoning and gateway spoofing.
+        """
+        guard = ArpPoisonGuard(
+            interface=interface,
+            gateway_ip=gateway_ip,
+            gateway_mac=gateway_mac,
+            trusted_ip_mac_map=trusted_ip_mac_map,
+        )
         events = guard.sniff(duration=duration)
         return [e.to_threat_string() for e in events]
 

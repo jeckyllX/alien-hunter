@@ -20,6 +20,7 @@ from alien_hunter.defenses.honey_auth import HoneyAuthTrap
 from alien_hunter.defenses.syn_scan import SynScanDetector, SynScanEvent
 from alien_hunter.defenses.dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
 from alien_hunter.defenses.dhcp_starvation import DhcpStarvationGuard, DhcpStarvationEvent
+from alien_hunter.defenses.arp_poison import ArpPoisonGuard, ArpPoisonEvent
 
 
 class TestLlmnrCanaryTrap(unittest.TestCase):
@@ -695,6 +696,202 @@ class TestDhcpStarvationGuard(unittest.TestCase):
         threats = ThreatDetector.check_dhcp_starvation(interface="eth0", duration=0.1)
         self.assertEqual(len(threats), 1)
         self.assertIn("DHCP Starvation", threats[0])
+
+
+class TestArpPoisonGuard(unittest.TestCase):
+    """Tests ARP cache poisoning, gateway masquerade, and gratuitous ARP flood detection."""
+
+    @staticmethod
+    def _make_arp_frame(
+        eth_src: str,
+        eth_dst: str,
+        op: int,
+        sender_mac: str,
+        sender_ip: str,
+        target_mac: str,
+        target_ip: str,
+    ) -> bytes:
+        eth_hdr = (
+            bytes.fromhex(eth_dst.replace(":", ""))
+            + bytes.fromhex(eth_src.replace(":", ""))
+            + struct.pack("!H", 0x0806)
+        )
+        arp_payload = struct.pack(
+            "!HHBBH6s4s6s4s",
+            1,  # htype: Ethernet
+            0x0800,  # ptype: IPv4
+            6,  # hlen
+            4,  # plen
+            op,  # 1 = req, 2 = reply
+            bytes.fromhex(sender_mac.replace(":", "")),
+            socket.inet_aton(sender_ip),
+            bytes.fromhex(target_mac.replace(":", "")),
+            socket.inet_aton(target_ip),
+        )
+        return eth_hdr + arp_payload
+
+    def test_parse_arp_packet_valid(self):
+        pkt = self._make_arp_frame(
+            eth_src="00:11:22:33:44:55",
+            eth_dst="66:77:88:99:AA:BB",
+            op=2,
+            sender_mac="00:11:22:33:44:55",
+            sender_ip="192.168.1.100",
+            target_mac="66:77:88:99:AA:BB",
+            target_ip="192.168.1.1",
+        )
+        parsed = ArpPoisonGuard.parse_arp_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["op"], 2)
+        self.assertEqual(parsed["sender_ip"], "192.168.1.100")
+        self.assertEqual(parsed["sender_mac"], "00:11:22:33:44:55")
+        self.assertFalse(parsed["is_garp"])
+
+    def test_parse_arp_packet_non_arp_short(self):
+        self.assertIsNone(ArpPoisonGuard.parse_arp_packet(b"\x00" * 30))
+
+    def test_detects_gateway_poisoning(self):
+        guard = ArpPoisonGuard(
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:11:22:33:44:55",
+            alert_cooldown=30.0,
+        )
+        # Attacker AA:BB:CC:DD:EE:FF sends ARP reply claiming 192.168.1.1
+        pkt = self._make_arp_frame(
+            eth_src="AA:BB:CC:DD:EE:FF",
+            eth_dst="66:77:88:99:AA:BB",
+            op=2,
+            sender_mac="AA:BB:CC:DD:EE:FF",
+            sender_ip="192.168.1.1",
+            target_mac="66:77:88:99:AA:BB",
+            target_ip="192.168.1.50",
+        )
+        event = guard.process_packet(pkt)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.threat_type, "GATEWAY_POISONING")
+        self.assertEqual(event.attacker_mac, "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(event.expected_mac, "00:11:22:33:44:55")
+        self.assertIn("Active ARP Cache Poisoning", event.to_threat_string())
+
+    def test_detects_l2_mac_mismatch(self):
+        guard = ArpPoisonGuard(alert_cooldown=30.0)
+        # Frame Ethernet src is 11:22:33:44:55:66 but ARP payload claims AA:BB:CC:DD:EE:FF
+        pkt = self._make_arp_frame(
+            eth_src="11:22:33:44:55:66",
+            eth_dst="FF:FF:FF:FF:FF:FF",
+            op=1,
+            sender_mac="AA:BB:CC:DD:EE:FF",
+            sender_ip="192.168.1.200",
+            target_mac="00:00:00:00:00:00",
+            target_ip="192.168.1.1",
+        )
+        event = guard.process_packet(pkt)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.threat_type, "L2_MAC_MISMATCH")
+        self.assertEqual(event.eth_src_mac, "11:22:33:44:55:66")
+        self.assertEqual(event.attacker_mac, "AA:BB:CC:DD:EE:FF")
+        self.assertIn("Forged ARP Frame", event.to_threat_string())
+
+    def test_detects_ip_mac_flip(self):
+        guard = ArpPoisonGuard(
+            trusted_ip_mac_map={"192.168.1.50": "00:AA:BB:CC:DD:EE"},
+            alert_cooldown=30.0,
+        )
+        # Rogue host 11:22:33:44:55:66 sends ARP reply claiming 192.168.1.50
+        pkt = self._make_arp_frame(
+            eth_src="11:22:33:44:55:66",
+            eth_dst="66:77:88:99:AA:BB",
+            op=2,
+            sender_mac="11:22:33:44:55:66",
+            sender_ip="192.168.1.50",
+            target_mac="66:77:88:99:AA:BB",
+            target_ip="192.168.1.1",
+        )
+        event = guard.process_packet(pkt)
+        self.assertIsNotNone(event)
+        self.assertEqual(event.threat_type, "IP_MAC_FLIP")
+        self.assertEqual(event.attacker_mac, "11:22:33:44:55:66")
+        self.assertEqual(event.expected_mac, "00:AA:BB:CC:DD:EE")
+        self.assertIn("ARP Spoofing / IP Conflict", event.to_threat_string())
+
+    def test_detects_garp_flood(self):
+        guard = ArpPoisonGuard(garp_burst_threshold=5, garp_window_seconds=2.0)
+        attacker = "02:00:00:00:00:99"
+        base_time = 1000.0
+
+        event = None
+        for i in range(5):
+            pkt = self._make_arp_frame(
+                eth_src=attacker,
+                eth_dst="FF:FF:FF:FF:FF:FF",
+                op=2,
+                sender_mac=attacker,
+                sender_ip="192.168.1.123",
+                target_mac="00:00:00:00:00:00",
+                target_ip="192.168.1.123",
+            )
+            ev = guard.process_packet(pkt, now=base_time + (i * 0.1))
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.threat_type, "GARP_FLOOD")
+        self.assertIn("Gratuitous ARP Reply Flood", event.to_threat_string())
+
+    def test_alert_cooldown_suppression(self):
+        guard = ArpPoisonGuard(
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:11:22:33:44:55",
+            alert_cooldown=10.0,
+        )
+        pkt = self._make_arp_frame(
+            eth_src="AA:BB:CC:DD:EE:FF",
+            eth_dst="66:77:88:99:AA:BB",
+            op=2,
+            sender_mac="AA:BB:CC:DD:EE:FF",
+            sender_ip="192.168.1.1",
+            target_mac="66:77:88:99:AA:BB",
+            target_ip="192.168.1.50",
+        )
+        ev1 = guard.process_packet(pkt, now=1000.0)
+        self.assertIsNotNone(ev1)
+
+        # Immediate follow-up packet within cooldown
+        ev2 = guard.process_packet(pkt, now=1002.0)
+        self.assertIsNone(ev2)
+
+    def test_update_topology(self):
+        guard = ArpPoisonGuard()
+        self.assertIsNone(guard.gateway_ip)
+        self.assertIsNone(guard.gateway_mac)
+
+        guard.update_topology(
+            gateway_ip="192.168.1.254",
+            gateway_mac="AA:11:22:33:44:55",
+            trusted_ip_mac_map={"192.168.1.10": "BB:22:33:44:55:66"},
+        )
+        self.assertEqual(guard.gateway_ip, "192.168.1.254")
+        self.assertEqual(guard.gateway_mac, "AA:11:22:33:44:55")
+        self.assertEqual(guard.trusted_ip_mac_map["192.168.1.10"], "BB:22:33:44:55:66")
+
+    @patch("socket.socket")
+    def test_sniff_handles_permission_error_gracefully(self, mock_socket_cls):
+        mock_socket_cls.side_effect = PermissionError("Operation not permitted")
+        guard = ArpPoisonGuard(interface="eth0")
+        events = guard.sniff(duration=0.1)
+        self.assertEqual(events, [])
+
+    @patch("alien_hunter.threats.ArpPoisonGuard.sniff")
+    def test_threat_detector_facade_check(self, mock_sniff):
+        from alien_hunter.threats import ThreatDetector
+
+        mock_event = MagicMock()
+        mock_event.to_threat_string.return_value = "CRITICAL: Active ARP Cache Poisoning detected!"
+        mock_sniff.return_value = [mock_event]
+
+        threats = ThreatDetector.check_realtime_arp_poisoning(interface="eth0", duration=0.1)
+        self.assertEqual(len(threats), 1)
+        self.assertIn("ARP Cache Poisoning", threats[0])
 
 
 if __name__ == "__main__":

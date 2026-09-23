@@ -181,6 +181,7 @@ def main():
         syn_scan_enabled = defenses_cfg.get("syn_scan_enabled", True)
         dns_tunneling_enabled = defenses_cfg.get("dns_tunneling_enabled", True)
         dhcp_starvation_enabled = defenses_cfg.get("dhcp_starvation_enabled", True)
+        arp_poison_enabled = defenses_cfg.get("arp_poison_enabled", True)
         sentinel = SentinelWatchdog(
             engine=engine,
             notifier=notifier,
@@ -194,6 +195,7 @@ def main():
             syn_scan_enabled=syn_scan_enabled,
             dns_tunneling_enabled=dns_tunneling_enabled,
             dhcp_starvation_enabled=dhcp_starvation_enabled,
+            arp_poison_enabled=arp_poison_enabled,
             sync_db=should_sync,
         )
         sentinel.start()

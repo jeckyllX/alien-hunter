@@ -33,6 +33,7 @@ Standard ICMP ping sweeps often miss active devices on local networks due to:
 * **Stealth TCP SYN Scan Detection:** Captures raw IPv4 TCP frames to detect half-open SYN port sweeps across closed or unallocated ports (e.g., `nmap -sS`, `masscan`).
 * **High-Entropy DNS Tunneling Detection:** Analyzes DNS queries on the local interface for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`).
 * **DHCP Starvation & Pool Exhaustion Guard:** Passively inspects Layer-2 DHCP traffic to detect rapid bursts of Discover and Request frames with spoofed or mutating hardware MAC addresses attempting pool depletion (e.g., `Yersinia`, `dhcpstarv`).
+* **Real-Time ARP Cache Poisoning & Gateway Guard:** Passively sniffs Layer-2 ARP frames (`EtherType 0x0806`) in real time to detect active gateway impersonation, Ethernet/ARP MAC address forgeries, trusted device IP hijacking, and gratuitous ARP reply floods (e.g., `arpspoof`, `bettercap`, `ettercap`).
 * **Port Drift Tracking:** Compares open TCP ports against baseline records in `known_devices.json` to flag newly exposed services.
 * **Promiscuous Mode Detection:** Sends non-broadcast unicast ARP probes to identify interfaces operating in promiscuous capture mode.
 * **DHCP Verification:** Probes UDP 67/68 to verify active DHCP servers and detect unauthorized gateway offers.
@@ -89,6 +90,7 @@ alien_hunter/
 │   ├── syn_scan.py       # Raw socket TCP SYN port scan detector
 │   ├── dns_tunneling.py  # Shannon entropy and DNS exfiltration detector
 │   ├── dhcp_starvation.py # DHCP starvation & pool exhaustion guard
+│   ├── arp_poison.py     # Real-time ARP cache poisoning & gateway guard
 │   ├── port_drift.py     # Baseline port comparison
 │   └── anti_sniff.py     # Promiscuous interface detection
 ├── scanners/             # Active and passive network discovery modules
@@ -208,7 +210,8 @@ Example schema:
     "honey_ports": [5555, 2323, 8888],
     "syn_scan_enabled": true,
     "dns_tunneling_enabled": true,
-    "dhcp_starvation_enabled": true
+    "dhcp_starvation_enabled": true,
+    "arp_poison_enabled": true
   },
   "notifications": {
     "telegram": {

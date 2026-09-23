@@ -525,6 +525,20 @@ class DiscoveryEngine:
             )
         )
 
+        # l) Real-Time ARP Cache Poisoning & Gateway Masquerade Guard
+        trusted_map = {
+            ip: mac for ip, mac in active_devices.items() if mac and mac in whitelist
+        }
+        threats.extend(
+            ThreatDetector.check_realtime_arp_poisoning(
+                interface=net_info.interface,
+                gateway_ip=net_info.gateway_ip,
+                gateway_mac=net_info.gateway_mac,
+                trusted_ip_mac_map=trusted_map,
+                duration=1.0,
+            )
+        )
+
         inventory: List[Device] = []
         alien_devices: List[Device] = []
 
