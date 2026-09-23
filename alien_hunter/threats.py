@@ -15,6 +15,7 @@ from .defenses.anti_sniff import AntiSniffDetector
 from .defenses.port_drift import PortDriftTracker
 from .defenses.syn_scan import SynScanDetector
 from .defenses.dns_tunneling import DnsTunnelingDetector
+from .defenses.dhcp_starvation import DhcpStarvationGuard
 
 
 class ThreatDetector:
@@ -360,6 +361,18 @@ class ThreatDetector:
             local_mac=local_mac,
         )
         events = detector.sniff(duration=duration)
+        return [e.to_threat_string() for e in events]
+
+    @staticmethod
+    def check_dhcp_starvation(
+        interface: Optional[str] = None,
+        duration: float = 1.0,
+    ) -> List[str]:
+        """
+        Passively sniffs UDP 67/68 traffic to detect DHCP starvation and pool exhaustion attacks.
+        """
+        guard = DhcpStarvationGuard(interface=interface)
+        events = guard.sniff(duration=duration)
         return [e.to_threat_string() for e in events]
 
 

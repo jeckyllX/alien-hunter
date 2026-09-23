@@ -19,6 +19,7 @@ from alien_hunter.defenses.honey_port import HoneyPortListener, HoneyPortEvent
 from alien_hunter.defenses.honey_auth import HoneyAuthTrap
 from alien_hunter.defenses.syn_scan import SynScanDetector, SynScanEvent
 from alien_hunter.defenses.dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
+from alien_hunter.defenses.dhcp_starvation import DhcpStarvationGuard, DhcpStarvationEvent
 
 
 class TestLlmnrCanaryTrap(unittest.TestCase):
@@ -519,6 +520,181 @@ class TestDnsTunnelingDetector(unittest.TestCase):
         detector = DnsTunnelingDetector(interface="eth0")
         events = detector.sniff(duration=0.1)
         self.assertEqual(events, [])
+
+
+class TestDhcpStarvationGuard(unittest.TestCase):
+    """Tests DHCP starvation, pool exhaustion, and MAC spoofing detection."""
+
+    @staticmethod
+    def _make_dhcp_frame(
+        src_mac_str: str,
+        chaddr_str: str,
+        msg_type: int = 1,
+        src_ip: str = "0.0.0.0",
+        dst_ip: str = "255.255.255.255",
+        xid: bytes = b"\x12\x34\x56\x78",
+    ) -> bytes:
+        dst_mac = b"\xff\xff\xff\xff\xff\xff"
+        src_mac = bytes.fromhex(src_mac_str.replace(":", ""))
+        ethertype = struct.pack("!H", 0x0800)
+
+        options = b"\x35\x01" + bytes([msg_type]) + b"\xff"
+
+        bootp = bytearray(240)
+        bootp[0] = 1  # BOOTREQUEST
+        bootp[1] = 1  # 10Mb Ethernet
+        bootp[2] = 6  # 6-byte MAC
+        bootp[3] = 0  # hops
+        bootp[4:8] = xid
+        bootp[8:10] = b"\x00\x00"
+        bootp[10:12] = b"\x80\x00"
+        bootp[12:16] = socket.inet_aton(src_ip)
+        bootp[28:34] = bytes.fromhex(chaddr_str.replace(":", ""))
+        bootp[236:240] = b"\x63\x82\x53\x63"
+        bootp.extend(options)
+
+        udp_len = 8 + len(bootp)
+        udp_hdr = struct.pack("!HHHH", 68, 67, udp_len, 0)
+
+        ip_total_len = 20 + udp_len
+        ip_hdr = struct.pack(
+            "!BBHHHBBH4s4s",
+            0x45,
+            0,
+            ip_total_len,
+            0x1234,
+            0,
+            64,
+            17,  # UDP
+            0,
+            socket.inet_aton(src_ip),
+            socket.inet_aton(dst_ip),
+        )
+
+        return dst_mac + src_mac + ethertype + ip_hdr + udp_hdr + bytes(bootp)
+
+    def test_parse_dhcp_packet_valid_discover(self):
+        pkt = self._make_dhcp_frame("00:11:22:33:44:55", "00:11:22:33:44:55", msg_type=1)
+        parsed = DhcpStarvationGuard.parse_dhcp_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["src_mac"], "00:11:22:33:44:55")
+        self.assertEqual(parsed["chaddr"], "00:11:22:33:44:55")
+        self.assertEqual(parsed["msg_type"], 1)
+        self.assertFalse(parsed["is_spoofed"])
+
+    def test_parse_dhcp_packet_spoofed_chaddr(self):
+        pkt = self._make_dhcp_frame("AA:BB:CC:DD:EE:FF", "00:11:22:33:44:55", msg_type=1)
+        parsed = DhcpStarvationGuard.parse_dhcp_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["src_mac"], "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(parsed["chaddr"], "00:11:22:33:44:55")
+        self.assertTrue(parsed["is_spoofed"])
+
+    def test_parse_dhcp_packet_non_dhcp_short(self):
+        self.assertIsNone(DhcpStarvationGuard.parse_dhcp_packet(b"\x00" * 100))
+
+    def test_detects_dhcp_starvation_burst(self):
+        guard = DhcpStarvationGuard(burst_threshold=5, rate_threshold=10.0, window_seconds=5.0, alert_cooldown=30.0)
+        macs = [
+            "02:00:00:00:00:01",
+            "02:00:00:00:00:02",
+            "02:00:00:00:00:03",
+            "02:00:00:00:00:04",
+            "02:00:00:00:00:05",
+        ]
+
+        event = None
+        base_time = 1000.0
+        for i, mac in enumerate(macs):
+            pkt = self._make_dhcp_frame(mac, mac, msg_type=1)
+            ev = guard.process_packet(pkt, now=base_time + (i * 0.5))
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.distinct_mac_count, 5)
+        self.assertEqual(event.request_count, 5)
+        self.assertIn("DHCP Starvation", event.to_threat_string())
+
+    def test_detects_dhcp_rate_flood(self):
+        guard = DhcpStarvationGuard(burst_threshold=10, rate_threshold=3.0, window_seconds=5.0)
+        macs = [
+            "02:00:00:00:00:01",
+            "02:00:00:00:00:02",
+            "02:00:00:00:00:03",
+        ]
+
+        event = None
+        base_time = 1000.0
+        # 3 distinct MACs within 0.4s -> 7.5 req/s, exceeding rate_threshold=3.0
+        for i, mac in enumerate(macs):
+            pkt = self._make_dhcp_frame(mac, mac, msg_type=1)
+            ev = guard.process_packet(pkt, now=base_time + (i * 0.2))
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.distinct_mac_count, 3)
+        self.assertGreaterEqual(event.burst_rate, 3.0)
+
+    def test_detects_mac_spoofing_flood(self):
+        guard = DhcpStarvationGuard(burst_threshold=5, window_seconds=5.0, alert_cooldown=30.0)
+        attacker_nic = "AA:BB:CC:11:22:33"
+        spoofed_chaddrs = [
+            "DE:AD:BE:EF:00:01",
+            "DE:AD:BE:EF:00:02",
+            "DE:AD:BE:EF:00:03",
+        ]
+
+        event = None
+        base_time = 1000.0
+        for i, chaddr in enumerate(spoofed_chaddrs):
+            pkt = self._make_dhcp_frame(attacker_nic, chaddr, msg_type=1)
+            ev = guard.process_packet(pkt, now=base_time + (i * 0.1))
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertTrue(event.is_spoofed_chaddr)
+        self.assertEqual(event.primary_src_mac, attacker_nic)
+        self.assertIn("Spoofed DHCP chaddr", event.to_threat_string())
+
+    def test_alert_cooldown_suppression(self):
+        guard = DhcpStarvationGuard(burst_threshold=3, alert_cooldown=10.0)
+        macs = ["02:00:00:00:00:01", "02:00:00:00:00:02", "02:00:00:00:00:03"]
+        base_time = 1000.0
+
+        event1 = None
+        for i, mac in enumerate(macs):
+            pkt = self._make_dhcp_frame(mac, mac, msg_type=1)
+            ev = guard.process_packet(pkt, now=base_time + (i * 0.1))
+            if ev:
+                event1 = ev
+
+        self.assertIsNotNone(event1)
+
+        pkt4 = self._make_dhcp_frame("02:00:00:00:00:04", "02:00:00:00:00:04", msg_type=1)
+        event2 = guard.process_packet(pkt4, now=base_time + 1.0)
+        self.assertIsNone(event2)
+
+    @patch("socket.socket")
+    def test_sniff_handles_permission_error_gracefully(self, mock_socket_cls):
+        mock_socket_cls.side_effect = PermissionError("Operation not permitted")
+        guard = DhcpStarvationGuard(interface="eth0")
+        events = guard.sniff(duration=0.1)
+        self.assertEqual(events, [])
+
+    @patch("alien_hunter.threats.DhcpStarvationGuard.sniff")
+    def test_threat_detector_facade_check(self, mock_sniff):
+        from alien_hunter.threats import ThreatDetector
+
+        mock_event = MagicMock()
+        mock_event.to_threat_string.return_value = "CRITICAL: DHCP Starvation detected!"
+        mock_sniff.return_value = [mock_event]
+
+        threats = ThreatDetector.check_dhcp_starvation(interface="eth0", duration=0.1)
+        self.assertEqual(len(threats), 1)
+        self.assertIn("DHCP Starvation", threats[0])
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ Standard ICMP ping sweeps often miss active devices on local networks due to:
 * **Decoy Honey-Ports & Auth Traps:** Binds non-blocking TCP listeners and service banner emulators (HTTP, FTP, Telnet) to configurable decoy ports (e.g., 2323, 5555, 8888) to detect internal port scans and capture brute-force credentials.
 * **Stealth TCP SYN Scan Detection:** Captures raw IPv4 TCP frames to detect half-open SYN port sweeps across closed or unallocated ports (e.g., `nmap -sS`, `masscan`).
 * **High-Entropy DNS Tunneling Detection:** Analyzes DNS queries on the local interface for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`).
+* **DHCP Starvation & Pool Exhaustion Guard:** Passively inspects Layer-2 DHCP traffic to detect rapid bursts of Discover and Request frames with spoofed or mutating hardware MAC addresses attempting pool depletion (e.g., `Yersinia`, `dhcpstarv`).
 * **Port Drift Tracking:** Compares open TCP ports against baseline records in `known_devices.json` to flag newly exposed services.
 * **Promiscuous Mode Detection:** Sends non-broadcast unicast ARP probes to identify interfaces operating in promiscuous capture mode.
 * **DHCP Verification:** Probes UDP 67/68 to verify active DHCP servers and detect unauthorized gateway offers.
@@ -87,6 +88,7 @@ alien_hunter/
 │   ├── honey_auth.py     # Emulated authentication traps (HTTP, FTP, Telnet)
 │   ├── syn_scan.py       # Raw socket TCP SYN port scan detector
 │   ├── dns_tunneling.py  # Shannon entropy and DNS exfiltration detector
+│   ├── dhcp_starvation.py # DHCP starvation & pool exhaustion guard
 │   ├── port_drift.py     # Baseline port comparison
 │   └── anti_sniff.py     # Promiscuous interface detection
 ├── scanners/             # Active and passive network discovery modules
@@ -205,7 +207,8 @@ Example schema:
     "honey_port_enabled": true,
     "honey_ports": [5555, 2323, 8888],
     "syn_scan_enabled": true,
-    "dns_tunneling_enabled": true
+    "dns_tunneling_enabled": true,
+    "dhcp_starvation_enabled": true
   },
   "notifications": {
     "telegram": {

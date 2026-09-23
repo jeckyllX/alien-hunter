@@ -180,6 +180,7 @@ def main():
         honey_ports = defenses_cfg.get("honey_ports", [5555, 2323, 8888]) if defenses_cfg.get("honey_port_enabled", True) else None
         syn_scan_enabled = defenses_cfg.get("syn_scan_enabled", True)
         dns_tunneling_enabled = defenses_cfg.get("dns_tunneling_enabled", True)
+        dhcp_starvation_enabled = defenses_cfg.get("dhcp_starvation_enabled", True)
         sentinel = SentinelWatchdog(
             engine=engine,
             notifier=notifier,
@@ -192,6 +193,7 @@ def main():
             honey_ports=honey_ports,
             syn_scan_enabled=syn_scan_enabled,
             dns_tunneling_enabled=dns_tunneling_enabled,
+            dhcp_starvation_enabled=dhcp_starvation_enabled,
             sync_db=should_sync,
         )
         sentinel.start()

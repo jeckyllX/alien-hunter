@@ -517,6 +517,14 @@ class DiscoveryEngine:
             )
         )
 
+        # k) DHCP Starvation & Pool Exhaustion Guard
+        threats.extend(
+            ThreatDetector.check_dhcp_starvation(
+                interface=net_info.interface,
+                duration=1.0,
+            )
+        )
+
         inventory: List[Device] = []
         alien_devices: List[Device] = []
 

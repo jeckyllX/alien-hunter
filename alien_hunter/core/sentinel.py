@@ -11,6 +11,7 @@ from ..config import ConfigManager
 from ..defenses.honey_port import HoneyPortListener
 from ..defenses.syn_scan import SynScanDetector
 from ..defenses.dns_tunneling import DnsTunnelingDetector
+from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from .engine import DiscoveryEngine
 
 
@@ -30,6 +31,7 @@ class SentinelWatchdog:
         honey_ports: Optional[List[int]] = None,
         syn_scan_enabled: bool = True,
         dns_tunneling_enabled: bool = True,
+        dhcp_starvation_enabled: bool = True,
         sync_db: bool = True,
     ):
         self.engine = engine
@@ -47,6 +49,8 @@ class SentinelWatchdog:
         self.syn_detector: Optional[SynScanDetector] = None
         self.dns_tunneling_enabled = dns_tunneling_enabled
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
+        self.dhcp_starvation_enabled = dhcp_starvation_enabled
+        self.dhcp_guard: Optional[DhcpStarvationGuard] = None
         self.sync_db = sync_db
 
     def start(self):
@@ -74,6 +78,11 @@ class SentinelWatchdog:
             self.dns_tunnel_detector = DnsTunnelingDetector(interface=self.interface)
             if self.dns_tunnel_detector.start():
                 print(f"{Colors.GREEN}[+] High-Entropy DNS Tunneling Detector active.{Colors.RESET}")
+
+        if self.dhcp_starvation_enabled:
+            self.dhcp_guard = DhcpStarvationGuard(interface=self.interface)
+            if self.dhcp_guard.start():
+                print(f"{Colors.GREEN}[+] DHCP Starvation & Pool Exhaustion Guard active.{Colors.RESET}")
 
         try:
             while True:
@@ -112,12 +121,18 @@ class SentinelWatchdog:
                         for dt in dns_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {dt}{Colors.RESET}")
 
-                    combined_threats = result.threats + honey_threats + syn_threats + dns_threats
+                    # Check for DHCP starvation floods
+                    dhcp_threats = self.dhcp_guard.get_threat_strings() if self.dhcp_guard else []
+                    if dhcp_threats:
+                        for dht in dhcp_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {dht}{Colors.RESET}")
+
+                    combined_threats = result.threats + honey_threats + syn_threats + dns_threats + dhcp_threats
                     new_aliens = [
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats or dns_threats:
+                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
@@ -156,3 +171,5 @@ class SentinelWatchdog:
                 self.syn_detector.stop()
             if self.dns_tunnel_detector:
                 self.dns_tunnel_detector.stop()
+            if self.dhcp_guard:
+                self.dhcp_guard.stop()
