@@ -89,6 +89,13 @@ class SynScanDetector:
         self.subnet_cidr = subnet_cidr
         self.local_ip = local_ip
         self.local_mac = local_mac.upper() if local_mac else None
+        if not self.local_mac and self.interface:
+            try:
+                with open(f"/sys/class/net/{self.interface}/address", "r") as f:
+                    self.local_mac = f.read().strip().upper()
+            except Exception:
+                pass
+
         self.window_seconds = window_seconds
         self.port_threshold = port_threshold
         self.host_threshold = host_threshold

@@ -67,6 +67,19 @@ class SentinelWatchdog:
             f"Polling every {self.interval}s. Active notification hooks: {active_hooks}. Press Ctrl+C to stop."
         )
 
+        net_info = None
+        if self.engine:
+            try:
+                net_info = self.engine.get_network_info(interface=self.interface)
+            except Exception:
+                pass
+
+        local_ip = net_info.local_ip if net_info else None
+        local_mac = net_info.local_mac if net_info else None
+        subnet_cidr = net_info.subnet_cidr if net_info else None
+        gateway_ip = net_info.gateway_ip if net_info else None
+        gateway_mac = net_info.gateway_mac if net_info else None
+
         if self.honey_ports:
             self.honey_listener = HoneyPortListener(ports=self.honey_ports)
             bound = self.honey_listener.start()
@@ -74,12 +87,22 @@ class SentinelWatchdog:
                 print(f"{Colors.GREEN}[+] Decoy Honey-Port Canary active on TCP ports: {', '.join(map(str, bound))}{Colors.RESET}")
 
         if self.syn_scan_enabled:
-            self.syn_detector = SynScanDetector(interface=self.interface)
+            self.syn_detector = SynScanDetector(
+                interface=self.interface,
+                subnet_cidr=subnet_cidr,
+                local_ip=local_ip,
+                local_mac=local_mac,
+            )
             if self.syn_detector.start():
                 print(f"{Colors.GREEN}[+] Stealth TCP SYN Scan Detector active.{Colors.RESET}")
 
         if self.dns_tunneling_enabled:
-            self.dns_tunnel_detector = DnsTunnelingDetector(interface=self.interface)
+            self.dns_tunnel_detector = DnsTunnelingDetector(
+                interface=self.interface,
+                subnet_cidr=subnet_cidr,
+                local_ip=local_ip,
+                local_mac=local_mac,
+            )
             if self.dns_tunnel_detector.start():
                 print(f"{Colors.GREEN}[+] High-Entropy DNS Tunneling Detector active.{Colors.RESET}")
 
@@ -89,7 +112,11 @@ class SentinelWatchdog:
                 print(f"{Colors.GREEN}[+] DHCP Starvation & Pool Exhaustion Guard active.{Colors.RESET}")
 
         if self.arp_poison_enabled:
-            self.arp_guard = ArpPoisonGuard(interface=self.interface)
+            self.arp_guard = ArpPoisonGuard(
+                interface=self.interface,
+                gateway_ip=gateway_ip,
+                gateway_mac=gateway_mac,
+            )
             if self.arp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning & Gateway Masquerade Guard active.{Colors.RESET}")
 
@@ -112,16 +139,28 @@ class SentinelWatchdog:
                             subnet_cidr=result.network.subnet_cidr if result.network else None,
                         )
 
-                    # Update ARP guard topology baseline
-                    if self.arp_guard and result.network:
-                        trusted_map = {
-                            d.ip: d.mac for d in result.devices if d.mac and d.trusted
-                        }
-                        self.arp_guard.update_topology(
-                            gateway_ip=result.network.gateway_ip,
-                            gateway_mac=result.network.gateway_mac,
-                            trusted_ip_mac_map=trusted_map,
-                        )
+                    # Update defense modules with current local identity and network baseline
+                    if result.network:
+                        if self.syn_detector:
+                            if result.network.local_ip:
+                                self.syn_detector.local_ip = result.network.local_ip
+                            if result.network.local_mac:
+                                self.syn_detector.local_mac = result.network.local_mac.upper()
+                        if self.dns_tunnel_detector:
+                            if result.network.local_ip:
+                                self.dns_tunnel_detector.local_ip = result.network.local_ip
+                            if result.network.local_mac:
+                                self.dns_tunnel_detector.local_mac = result.network.local_mac.upper()
+
+                        if self.arp_guard:
+                            trusted_map = {
+                                d.ip: d.mac for d in result.devices if d.mac and d.trusted
+                            }
+                            self.arp_guard.update_topology(
+                                gateway_ip=result.network.gateway_ip,
+                                gateway_mac=result.network.gateway_mac,
+                                trusted_ip_mac_map=trusted_map,
+                            )
 
                     # Check for honeypot intrusions
                     honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []

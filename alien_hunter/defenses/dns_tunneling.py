@@ -95,6 +95,13 @@ class DnsTunnelingDetector:
         self.subnet_cidr = subnet_cidr
         self.local_ip = local_ip
         self.local_mac = local_mac.upper() if local_mac else None
+        if not self.local_mac and self.interface:
+            try:
+                with open(f"/sys/class/net/{self.interface}/address", "r") as f:
+                    self.local_mac = f.read().strip().upper()
+            except Exception:
+                pass
+
         self.entropy_threshold = entropy_threshold
         self.length_threshold = length_threshold
         self.burst_threshold = burst_threshold
