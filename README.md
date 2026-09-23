@@ -217,6 +217,7 @@ Example schema:
     "provider": "ollama",
     "endpoint": "http://localhost:11434",
     "model": "qwen2.5:0.5b",
+    "api_key": "",
     "timeout_seconds": 90,
     "analyze_on": "alien_only",
     "cache_results": true
@@ -226,10 +227,10 @@ Example schema:
 
 ### 3. AI Providers
 Supported values for `"provider"`:
-* `ollama`: Local inference (e.g., `qwen2.5:0.5b`, `llama3.2:1b`).
-* `openai_compatible`: OpenAI-compatible endpoints (Groq, OpenAI, OpenRouter, DeepSeek, LM Studio).
-* `anthropic`: Anthropic Messages API.
-* `gemini`: Google Gemini REST API.
+* `ollama`: Local inference (e.g., `qwen2.5:0.5b`, `llama3.2:1b`). No API key required.
+* `openai_compatible`: OpenAI-compatible endpoints (Groq, OpenAI, OpenRouter, DeepSeek, LM Studio). Set `"api_key"` if authentication is required.
+* `anthropic`: Anthropic Messages API. Requires `"api_key"`.
+* `gemini`: Google Gemini REST API. Requires `"api_key"`.
 
 ---
 

@@ -8,6 +8,7 @@ from .anti_sniff import AntiSniffDetector
 from .port_drift import PortDriftTracker
 from .honey_port import HoneyPortListener, HoneyPortEvent
 from .honey_auth import HoneyAuthTrap
+from .syn_scan import SynScanDetector, SynScanEvent
 
 __all__ = [
     "LlmnrCanaryTrap",
@@ -19,4 +20,6 @@ __all__ = [
     "HoneyPortListener",
     "HoneyPortEvent",
     "HoneyAuthTrap",
+    "SynScanDetector",
+    "SynScanEvent",
 ]

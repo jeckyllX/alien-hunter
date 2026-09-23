@@ -9,6 +9,7 @@ from ..reporting.console import Colors
 from ..notifications.engine import NotificationEngine
 from ..config import ConfigManager
 from ..defenses.honey_port import HoneyPortListener
+from ..defenses.syn_scan import SynScanDetector
 from .engine import DiscoveryEngine
 
 
@@ -26,6 +27,7 @@ class SentinelWatchdog:
         interface: Optional[str] = None,
         ai_engine: Optional[Any] = None,
         honey_ports: Optional[List[int]] = None,
+        syn_scan_enabled: bool = True,
     ):
         self.engine = engine
         self.notifier = notifier
@@ -38,6 +40,8 @@ class SentinelWatchdog:
         self.known_alien_macs: Set[str] = set()
         self.honey_ports = honey_ports
         self.honey_listener: Optional[HoneyPortListener] = None
+        self.syn_scan_enabled = syn_scan_enabled
+        self.syn_detector: Optional[SynScanDetector] = None
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -54,6 +58,11 @@ class SentinelWatchdog:
             bound = self.honey_listener.start()
             if bound:
                 print(f"{Colors.GREEN}[+] Decoy Honey-Port Canary active on TCP ports: {', '.join(map(str, bound))}{Colors.RESET}")
+
+        if self.syn_scan_enabled:
+            self.syn_detector = SynScanDetector(interface=self.interface)
+            if self.syn_detector.start():
+                print(f"{Colors.GREEN}[+] Stealth TCP SYN Scan Detector active.{Colors.RESET}")
 
         try:
             while True:
@@ -79,12 +88,18 @@ class SentinelWatchdog:
                         for ht in honey_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {ht}{Colors.RESET}")
 
-                    combined_threats = result.threats + honey_threats
+                    # Check for stealth SYN port scans
+                    syn_threats = self.syn_detector.get_threat_strings() if self.syn_detector else []
+                    if syn_threats:
+                        for st in syn_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {st}{Colors.RESET}")
+
+                    combined_threats = result.threats + honey_threats + syn_threats
                     new_aliens = [
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats:
+                    if new_aliens or honey_threats or syn_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
@@ -119,3 +134,5 @@ class SentinelWatchdog:
         finally:
             if self.honey_listener:
                 self.honey_listener.stop()
+            if self.syn_detector:
+                self.syn_detector.stop()

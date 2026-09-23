@@ -13,6 +13,7 @@ from .defenses.dns_integrity import DnsIntegrityAuditor
 from .defenses.ipv6_guard import Ipv6Guard
 from .defenses.anti_sniff import AntiSniffDetector
 from .defenses.port_drift import PortDriftTracker
+from .defenses.syn_scan import SynScanDetector
 
 
 class ThreatDetector:
@@ -319,3 +320,24 @@ class ThreatDetector:
             whitelist_entry=whitelist_entry,
             cached_baseline=cached_baseline,
         )
+
+    @staticmethod
+    def check_syn_scans(
+        interface: Optional[str] = None,
+        subnet_cidr: Optional[str] = None,
+        local_ip: Optional[str] = None,
+        local_mac: Optional[str] = None,
+        duration: float = 1.0,
+    ) -> List[str]:
+        """
+        Passively sniffs raw link frames to detect active stealth TCP SYN port scans.
+        """
+        detector = SynScanDetector(
+            interface=interface,
+            subnet_cidr=subnet_cidr,
+            local_ip=local_ip,
+            local_mac=local_mac,
+        )
+        events = detector.sniff(duration=duration)
+        return [e.to_threat_string() for e in events]
+

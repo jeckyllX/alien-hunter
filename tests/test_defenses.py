@@ -17,6 +17,7 @@ from alien_hunter.defenses.anti_sniff import AntiSniffDetector
 from alien_hunter.defenses.port_drift import PortDriftTracker
 from alien_hunter.defenses.honey_port import HoneyPortListener, HoneyPortEvent
 from alien_hunter.defenses.honey_auth import HoneyAuthTrap
+from alien_hunter.defenses.syn_scan import SynScanDetector, SynScanEvent
 
 
 class TestLlmnrCanaryTrap(unittest.TestCase):
@@ -271,5 +272,124 @@ class TestHoneyAuthTrap(unittest.TestCase):
         self.assertEqual(meta["payload_snippet"], "SMB Negotiation Request")
 
 
+class TestSynScanDetector(unittest.TestCase):
+    """Tests stealth TCP SYN, NULL, FIN, and XMAS port scan detection."""
+
+    @staticmethod
+    def _make_tcp_pkt(
+        src_ip: str,
+        dst_ip: str,
+        src_port: int,
+        dst_port: int,
+        flags: int,
+        src_mac: str = "AA:BB:CC:DD:EE:FF",
+    ) -> bytes:
+        dst_mac_bytes = b"\x00\x11\x22\x33\x44\x55"
+        src_mac_bytes = bytes.fromhex(src_mac.replace(":", ""))
+        eth_hdr = dst_mac_bytes + src_mac_bytes + struct.pack("!H", 0x0800)
+        s_ip = socket.inet_aton(src_ip)
+        d_ip = socket.inet_aton(dst_ip)
+        ip_hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 40, 12345, 0, 64, 6, 0, s_ip, d_ip)
+        tcp_hdr = struct.pack("!HHIIBBHHH", src_port, dst_port, 1000, 0, 0x50, flags, 65535, 0, 0)
+        return eth_hdr + ip_hdr + tcp_hdr
+
+    def test_parse_tcp_packet(self):
+        pkt = self._make_tcp_pkt("192.168.1.100", "192.168.1.1", 54321, 80, 0x02)
+        parsed = SynScanDetector.parse_tcp_packet(pkt)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["src_ip"], "192.168.1.100")
+        self.assertEqual(parsed["dst_ip"], "192.168.1.1")
+        self.assertEqual(parsed["dst_port"], 80)
+        self.assertEqual(parsed["flags"], 0x02)
+
+        # Truncated packet
+        self.assertIsNone(SynScanDetector.parse_tcp_packet(pkt[:40]))
+
+        # Non-IPv4 ethertype (e.g. ARP 0x0806)
+        arp_pkt = pkt[:12] + struct.pack("!H", 0x0806) + pkt[14:]
+        self.assertIsNone(SynScanDetector.parse_tcp_packet(arp_pkt))
+
+    def test_vertical_port_scan_detection(self):
+        detector = SynScanDetector(subnet_cidr="192.168.1.0/24", port_threshold=8)
+        event = None
+        ports = [21, 22, 23, 25, 80, 110, 143, 443]
+
+        for i, port in enumerate(ports):
+            pkt = self._make_tcp_pkt("192.168.1.150", "192.168.1.1", 40000 + i, port, 0x02)
+            ev = detector.process_packet(pkt)
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.scan_profile, "Vertical Port Scan")
+        self.assertEqual(event.scan_type, "SYN Scan")
+        self.assertEqual(event.target_count, 8)
+        self.assertIn("CRITICAL: Stealth TCP Port Scan detected!", event.to_threat_string())
+        self.assertIn("Vertical Port Scan", event.to_threat_string())
+
+    def test_horizontal_subnet_sweep_detection(self):
+        detector = SynScanDetector(subnet_cidr="192.168.1.0/24", host_threshold=5)
+        event = None
+
+        for i in range(1, 6):
+            pkt = self._make_tcp_pkt("192.168.1.150", f"192.168.1.{i}", 40000 + i, 445, 0x02)
+            ev = detector.process_packet(pkt)
+            if ev:
+                event = ev
+
+        self.assertIsNotNone(event)
+        self.assertEqual(event.scan_profile, "Horizontal Subnet Sweep")
+        self.assertEqual(event.scan_type, "SYN Scan")
+        self.assertIn("Horizontal Subnet Sweep", event.to_threat_string())
+
+    def test_abnormal_scan_flags(self):
+        detector = SynScanDetector(subnet_cidr="192.168.1.0/24")
+
+        # XMAS Scan (FIN + PSH + URG = 0x29)
+        xmas_pkt = self._make_tcp_pkt("192.168.1.200", "192.168.1.1", 41001, 80, 0x29)
+        ev_xmas = detector.process_packet(xmas_pkt)
+        self.assertIsNotNone(ev_xmas)
+        self.assertEqual(ev_xmas.scan_type, "XMAS Scan")
+
+        # NULL Scan (Flags = 0x00)
+        null_pkt = self._make_tcp_pkt("192.168.1.201", "192.168.1.1", 41002, 80, 0x00)
+        ev_null = detector.process_packet(null_pkt)
+        self.assertIsNotNone(ev_null)
+        self.assertEqual(ev_null.scan_type, "NULL Scan")
+
+        # FIN Scan (Flags = 0x01)
+        fin_pkt = self._make_tcp_pkt("192.168.1.202", "192.168.1.1", 41003, 80, 0x01)
+        ev_fin = detector.process_packet(fin_pkt)
+        self.assertIsNotNone(ev_fin)
+        self.assertEqual(ev_fin.scan_type, "FIN Scan")
+
+    def test_filters_benign_traffic_and_self(self):
+        detector = SynScanDetector(
+            subnet_cidr="192.168.1.0/24",
+            local_ip="192.168.1.50",
+            local_mac="AA:BB:CC:00:11:22",
+        )
+
+        # Self-originated traffic
+        self_pkt = self._make_tcp_pkt("192.168.1.50", "192.168.1.1", 50000, 80, 0x02)
+        self.assertIsNone(detector.process_packet(self_pkt))
+
+        # Single benign SYN connection from another host (does not exceed threshold)
+        benign_pkt = self._make_tcp_pkt("192.168.1.70", "192.168.1.1", 50001, 443, 0x02)
+        self.assertIsNone(detector.process_packet(benign_pkt))
+
+        # Normal established ACK data packet (flags 0x10)
+        ack_pkt = self._make_tcp_pkt("192.168.1.70", "192.168.1.1", 50001, 443, 0x10)
+        self.assertIsNone(detector.process_packet(ack_pkt))
+
+    @patch("socket.socket")
+    def test_sniff_handles_permission_error_gracefully(self, mock_socket_cls):
+        mock_socket_cls.side_effect = PermissionError("Operation not permitted")
+        detector = SynScanDetector(interface="eth0")
+        events = detector.sniff(duration=0.1)
+        self.assertEqual(events, [])
+
+
 if __name__ == "__main__":
     unittest.main()
+

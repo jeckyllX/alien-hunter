@@ -495,6 +495,17 @@ class DiscoveryEngine:
         if current_ssid:
             threats.extend(ThreatDetector.check_wifi_threats(current_ssid))
 
+        # i) Stealth TCP Half-Open / SYN Port Scan Detector
+        threats.extend(
+            ThreatDetector.check_syn_scans(
+                interface=net_info.interface,
+                subnet_cidr=net_info.subnet_cidr,
+                local_ip=net_info.local_ip,
+                local_mac=net_info.local_mac,
+                duration=1.0,
+            )
+        )
+
         inventory: List[Device] = []
         alien_devices: List[Device] = []
 
