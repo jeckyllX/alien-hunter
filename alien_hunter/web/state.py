@@ -57,23 +57,37 @@ class SentinelState:
             trusted: List[Dict[str, Any]] = []
             alien: List[Dict[str, Any]] = []
 
-            existing_trusted = {d.get("mac", "").upper(): d for d in self.trusted_devices if "mac" in d}
+            now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            existing_trusted = {d.get("mac", "").upper(): dict(d) for d in self.trusted_devices if d.get("mac")}
+            seen_trusted_macs = set()
+
             for dev in devices:
                 dev_dict = self._device_to_dict(dev)
                 mac_upper = dev_dict.get("mac", "").upper()
-                if mac_upper in existing_trusted:
-                    prev = existing_trusted[mac_upper]
-                    if not dev_dict.get("owner") or dev_dict.get("owner") == "User":
-                        dev_dict["owner"] = prev.get("owner", "User")
-                    if not dev_dict.get("device_type") or dev_dict.get("device_type") == "Generic":
-                        dev_dict["device_type"] = prev.get("device_type", "Generic")
-                    if prev.get("friendly_name") and (not dev_dict.get("friendly_name") or dev_dict.get("friendly_name") == "Unknown"):
-                        dev_dict["friendly_name"] = prev["friendly_name"]
-                        dev_dict["name"] = prev["friendly_name"]
                 if dev_dict.get("trusted"):
+                    dev_dict["status"] = getattr(dev, "status", "Online / Active")
+                    dev_dict["last_seen"] = now_iso
+                    if mac_upper in existing_trusted:
+                        prev = existing_trusted[mac_upper]
+                        if not dev_dict.get("owner") or dev_dict.get("owner") == "User":
+                            dev_dict["owner"] = prev.get("owner", "User")
+                        if not dev_dict.get("device_type") or dev_dict.get("device_type") == "Generic":
+                            dev_dict["device_type"] = prev.get("device_type", "Generic")
+                        if prev.get("friendly_name") and (not dev_dict.get("friendly_name") or dev_dict.get("friendly_name") == "Unknown"):
+                            dev_dict["friendly_name"] = prev["friendly_name"]
+                            dev_dict["name"] = prev["friendly_name"]
                     trusted.append(dev_dict)
+                    seen_trusted_macs.add(mac_upper)
                 else:
+                    dev_dict["last_seen"] = now_iso
                     alien.append(dev_dict)
+
+            # Preserve trusted devices that are currently inactive/sleeping
+            for mac_upper, prev in existing_trusted.items():
+                if mac_upper not in seen_trusted_macs:
+                    unseen_dev = dict(prev)
+                    unseen_dev["status"] = "Offline / Asleep"
+                    trusted.append(unseen_dev)
 
             self.trusted_devices = trusted
             self.alien_devices = alien
@@ -214,6 +228,7 @@ class SentinelState:
             "mdns_services": getattr(dev, "mdns_services", []),
             "aliases": getattr(dev, "aliases", []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
+            "last_seen": getattr(dev, "last_seen", "") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
     @staticmethod

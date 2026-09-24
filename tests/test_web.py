@@ -146,6 +146,7 @@ class TestLightweightWebServer(unittest.TestCase):
                 "owner": "Admin",
                 "device_type": "Gateway",
                 "primary_ip": "192.168.1.1",
+                "last_seen": "2026-09-24T12:00:00Z",
             }
         }
         self.config_mgr.save_whitelist(initial_whitelist, self.whitelist_file)
@@ -211,7 +212,7 @@ class TestLightweightWebServer(unittest.TestCase):
             self.assertIn("application/json", res.headers.get("Content-Type", ""))
             data = json.loads(res.read().decode("utf-8"))
             self.assertTrue(data["is_running"])
-            self.assertEqual(data["counts"]["trusted_devices"], 0)
+            self.assertEqual(data["counts"]["trusted_devices"], 1)
             self.assertEqual(data["counts"]["alien_devices"], 1)
             self.assertEqual(data["counts"]["active_threats"], 1)
 
@@ -222,6 +223,9 @@ class TestLightweightWebServer(unittest.TestCase):
             data = json.loads(res.read().decode("utf-8"))
             self.assertIn("trusted", data)
             self.assertIn("alien", data)
+            self.assertEqual(len(data["trusted"]), 1)
+            self.assertEqual(data["trusted"][0]["mac"], "11:22:33:44:55:66")
+            self.assertTrue(bool(data["trusted"][0].get("last_seen", "")))
             self.assertEqual(len(data["alien"]), 1)
             self.assertEqual(data["alien"][0]["mac"], "AA:BB:CC:11:22:33")
 

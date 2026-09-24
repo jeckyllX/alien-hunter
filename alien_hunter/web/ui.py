@@ -460,6 +460,24 @@ function renderAlienTable() {
   }).join('');
 }
 
+function formatLastSeen(ts) {
+  if (!ts) return '--';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return escapeHtml(ts.replace('T', ' ').replace('Z', ''));
+    const now = new Date();
+    const diffSec = Math.floor((now - d) / 1000);
+    if (diffSec < 60) return '<span style="color: var(--accent-green); font-weight: 500;">Just now</span>';
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    const days = Math.floor(diffSec / 86400);
+    if (days < 7) return `${days}d ago`;
+    return escapeHtml(d.toISOString().replace('T', ' ').substring(0, 16));
+  } catch (e) {
+    return escapeHtml(ts.replace('T', ' ').replace('Z', ''));
+  }
+}
+
 function renderTrustedTable() {
   const tbody = document.getElementById('trustedTableBody');
   const query = (document.getElementById('whitelistSearch').value || '').toLowerCase().trim();
@@ -486,21 +504,22 @@ function renderTrustedTable() {
     const hasDifferentHost = dev.hostname && dev.hostname !== 'Unknown' && dev.hostname !== friendly;
     const hostSubtitle = hasDifferentHost ? `<div style="font-size: 0.72rem; color: var(--text-dim); font-family: monospace;">Host: ${escapeHtml(dev.hostname)}</div>` : '';
     const owner = dev.owner && dev.owner !== 'User' ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${escapeHtml(dev.owner)})</span>` : '';
+    const isAsleep = dev.status && (dev.status.includes('Offline') || dev.status.includes('Asleep'));
+    const statusBadge = isAsleep ? ` <span class="badge badge-inactive" style="font-size: 0.65rem; padding: 2px 6px;">Asleep</span>` : '';
     const ip = dev.ip || dev.primary_ip || '--';
     const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
     const aliases = aliasList.length > 0 ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${escapeHtml(aliasList.join(', '))}</div>` : '';
     const portList = Array.isArray(dev.ports) ? dev.ports : (Array.isArray(dev.open_ports) ? dev.open_ports : []);
     const ports = portList.join(', ') || '--';
-    const lastSeen = dev.last_seen ? dev.last_seen.replace('T', ' ').replace('Z', '') : '--';
 
     return `
       <tr>
-        <td><strong>${escapeHtml(friendly)}</strong>${owner}${hostSubtitle}</td>
+        <td><strong>${escapeHtml(friendly)}</strong>${owner}${statusBadge}${hostSubtitle}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
         <td>${escapeHtml(dev.vendor || 'N/A')}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
-        <td style="font-size: 0.75rem; color: var(--text-dim);">${escapeHtml(lastSeen)}</td>
+        <td style="font-size: 0.8rem; color: var(--text-dim);" title="${escapeHtml(dev.last_seen || '')}">${formatLastSeen(dev.last_seen)}</td>
       </tr>
     `;
   }).join('');
