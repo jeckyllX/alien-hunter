@@ -57,8 +57,19 @@ class SentinelState:
             trusted: List[Dict[str, Any]] = []
             alien: List[Dict[str, Any]] = []
 
+            existing_trusted = {d.get("mac", "").upper(): d for d in self.trusted_devices if "mac" in d}
             for dev in devices:
                 dev_dict = self._device_to_dict(dev)
+                mac_upper = dev_dict.get("mac", "").upper()
+                if mac_upper in existing_trusted:
+                    prev = existing_trusted[mac_upper]
+                    if not dev_dict.get("owner") or dev_dict.get("owner") == "User":
+                        dev_dict["owner"] = prev.get("owner", "User")
+                    if not dev_dict.get("device_type") or dev_dict.get("device_type") == "Generic":
+                        dev_dict["device_type"] = prev.get("device_type", "Generic")
+                    if prev.get("friendly_name") and (not dev_dict.get("friendly_name") or dev_dict.get("friendly_name") == "Unknown"):
+                        dev_dict["friendly_name"] = prev["friendly_name"]
+                        dev_dict["name"] = prev["friendly_name"]
                 if dev_dict.get("trusted"):
                     trusted.append(dev_dict)
                 else:
@@ -75,16 +86,21 @@ class SentinelState:
                 if not isinstance(entry, dict):
                     continue
                 mac_upper = mac.upper()
+                name = entry.get("name", "Trusted Device")
                 trusted.append(
                     {
                         "mac": mac_upper,
                         "ip": entry.get("primary_ip", ""),
-                        "name": entry.get("name", "Trusted Device"),
+                        "name": name,
+                        "friendly_name": name,
+                        "display_name": name,
+                        "hostname": entry.get("hostname", "Unknown"),
                         "owner": entry.get("owner", "User"),
                         "device_type": entry.get("device_type", "Generic"),
                         "trusted": True,
                         "is_alien": False,
                         "ports": entry.get("ports", []),
+                        "open_ports": entry.get("ports", []),
                         "services": entry.get("services", []),
                         "vendor": entry.get("vendor", "N/A"),
                         "last_seen": entry.get("last_seen", ""),
@@ -96,6 +112,7 @@ class SentinelState:
     def update_whitelist_entry(self, mac: str, entry: Dict[str, Any]):
         """Transfers a device from alien to trusted in real time after whitelisting."""
         mac_upper = mac.upper()
+        name = entry.get("name", "Trusted Device")
         with self._lock:
             new_alien: List[Dict[str, Any]] = []
             target_dev = None
@@ -111,7 +128,8 @@ class SentinelState:
             if target_dev:
                 target_dev["trusted"] = True
                 target_dev["is_alien"] = False
-                target_dev["name"] = entry.get("name", target_dev.get("hostname", ""))
+                target_dev["name"] = name
+                target_dev["friendly_name"] = name
                 target_dev["owner"] = entry.get("owner", "User")
                 target_dev["device_type"] = entry.get("device_type", "Generic")
                 self.trusted_devices.append(target_dev)
@@ -120,12 +138,16 @@ class SentinelState:
                     {
                         "mac": mac_upper,
                         "ip": entry.get("primary_ip", ""),
-                        "name": entry.get("name", "Trusted Device"),
+                        "name": name,
+                        "friendly_name": name,
+                        "display_name": name,
+                        "hostname": "Unknown",
                         "owner": entry.get("owner", "User"),
                         "device_type": entry.get("device_type", "Generic"),
                         "trusted": True,
                         "is_alien": False,
                         "ports": entry.get("ports", []),
+                        "open_ports": entry.get("ports", []),
                         "services": entry.get("services", []),
                         "vendor": entry.get("vendor", "N/A"),
                         "last_seen": entry.get("last_seen", ""),
@@ -170,17 +192,23 @@ class SentinelState:
         """Converts Device model or dictionary into uniform JSON-serializable dict."""
         if isinstance(dev, dict):
             return dict(dev)
+        friendly = getattr(dev, "friendly_name", None) or getattr(dev, "display_name", None)
+        hostname = getattr(dev, "hostname", "Unknown")
+        name = friendly or (hostname if hostname != "Unknown" else "Device")
         return {
             "ip": getattr(dev, "ip", ""),
             "mac": getattr(dev, "mac", ""),
-            "hostname": getattr(dev, "hostname", "Unknown"),
-            "display_name": getattr(dev, "display_name", getattr(dev, "hostname", "Unknown")),
-            "friendly_name": getattr(dev, "friendly_name", None),
+            "name": name,
+            "friendly_name": friendly or name,
+            "display_name": getattr(dev, "display_name", name),
+            "hostname": hostname,
+            "owner": getattr(dev, "owner", "User"),
             "vendor": getattr(dev, "vendor", "N/A"),
             "status": getattr(dev, "status", "Online / Active"),
             "trusted": getattr(dev, "trusted", False),
             "is_alien": getattr(dev, "is_alien", False),
             "open_ports": getattr(dev, "open_ports", []),
+            "ports": getattr(dev, "open_ports", []),
             "threats": getattr(dev, "threats", []),
             "notes": getattr(dev, "notes", []),
             "mdns_services": getattr(dev, "mdns_services", []),

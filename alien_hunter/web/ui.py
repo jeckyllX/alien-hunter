@@ -467,12 +467,13 @@ function renderTrustedTable() {
 
   const filtered = cachedTrusted.filter(dev => {
     if (!query) return true;
-    const name = (dev.name || dev.hostname || '').toLowerCase();
+    const name = (dev.friendly_name || dev.name || dev.display_name || '').toLowerCase();
+    const host = (dev.hostname || '').toLowerCase();
     const owner = (dev.owner || '').toLowerCase();
     const ip = (dev.ip || dev.primary_ip || '').toLowerCase();
     const mac = (dev.mac || '').toLowerCase();
     const vendor = (dev.vendor || '').toLowerCase();
-    return name.includes(query) || owner.includes(query) || ip.includes(query) || mac.includes(query) || vendor.includes(query);
+    return name.includes(query) || host.includes(query) || owner.includes(query) || ip.includes(query) || mac.includes(query) || vendor.includes(query);
   });
 
   if (filtered.length === 0) {
@@ -481,8 +482,10 @@ function renderTrustedTable() {
   }
 
   tbody.innerHTML = filtered.map(dev => {
-    const name = dev.name || dev.hostname || 'Device';
-    const owner = dev.owner ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${escapeHtml(dev.owner)})</span>` : '';
+    const friendly = dev.friendly_name || dev.name || dev.display_name || (dev.hostname !== 'Unknown' ? dev.hostname : 'Device');
+    const hasDifferentHost = dev.hostname && dev.hostname !== 'Unknown' && dev.hostname !== friendly;
+    const hostSubtitle = hasDifferentHost ? `<div style="font-size: 0.72rem; color: var(--text-dim); font-family: monospace;">Host: ${escapeHtml(dev.hostname)}</div>` : '';
+    const owner = dev.owner && dev.owner !== 'User' ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${escapeHtml(dev.owner)})</span>` : '';
     const ip = dev.ip || dev.primary_ip || '--';
     const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
     const aliases = aliasList.length > 0 ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${escapeHtml(aliasList.join(', '))}</div>` : '';
@@ -492,7 +495,7 @@ function renderTrustedTable() {
 
     return `
       <tr>
-        <td><strong>${escapeHtml(name)}</strong>${owner}</td>
+        <td><strong>${escapeHtml(friendly)}</strong>${owner}${hostSubtitle}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
         <td>${escapeHtml(dev.vendor || 'N/A')}</td>
