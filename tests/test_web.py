@@ -197,6 +197,13 @@ class TestLightweightWebServer(unittest.TestCase):
         with urlopen(req, timeout=3) as res:
             self.assertEqual(res.status, 200)
 
+        # HEAD /
+        req = Request(f"{self.base_url}/", method="HEAD")
+        with urlopen(req, timeout=3) as res:
+            self.assertEqual(res.status, 200)
+            self.assertIn("text/html", res.headers.get("Content-Type", ""))
+            self.assertGreater(int(res.headers.get("Content-Length", 0)), 0)
+
     def test_get_api_status(self):
         req = Request(f"{self.base_url}/api/status")
         with urlopen(req, timeout=3) as res:

@@ -73,6 +73,25 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         else:
             self._send_json_response(404, {"error": "Not Found"})
 
+    def do_HEAD(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+        if path in ("", "/index.html"):
+            body = DASHBOARD_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+        elif path in ("/api/status", "/api/devices"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
