@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     parser.add_argument("-w", "--watch", action="store_true", help="Run in continuous sentinel / daemon mode")
     parser.add_argument("--interval", type=int, default=300, help="Interval in seconds for watch mode (default: 300)")
+    parser.add_argument("--web", action="store_true", help="Launch web dashboard and REST API")
+    parser.add_argument("--web-port", type=int, default=None, help="Port for the web dashboard (default: 8080)")
+    parser.add_argument("--web-host", type=str, default=None, help="Host/IP to bind the web dashboard (default: 0.0.0.0)")
     parser.add_argument("--test-notify", action="store_true", help="Send a simulated test alert through configured notification hooks")
     parser.add_argument("--notify", action="store_true", help="Dispatch scan findings & AI posture notification even if no alien devices are found")
     parser.add_argument("--sync-db", action="store_true", help="Sync observed device telemetry (aliases, discovery methods, ports, services) into known_devices.json")
@@ -175,7 +178,12 @@ def main():
 
     should_sync = (args.sync_db or config.get("auto_sync_database", True)) and not args.no_sync_db
 
-    if args.watch:
+    web_cfg = config.get("web_ui", {})
+    web_enabled = bool(args.web or web_cfg.get("enabled", False))
+    web_port = args.web_port if args.web_port is not None else int(web_cfg.get("port", 8080))
+    web_host = args.web_host if args.web_host is not None else str(web_cfg.get("host", "0.0.0.0"))
+
+    if args.watch or args.web:
         defenses_cfg = config.get("defenses", {})
         honey_ports = defenses_cfg.get("honey_ports", [5555, 2323, 8888]) if defenses_cfg.get("honey_port_enabled", True) else None
         syn_scan_enabled = defenses_cfg.get("syn_scan_enabled", True)
@@ -197,6 +205,9 @@ def main():
             dhcp_starvation_enabled=dhcp_starvation_enabled,
             arp_poison_enabled=arp_poison_enabled,
             sync_db=should_sync,
+            web_enabled=web_enabled,
+            web_host=web_host,
+            web_port=web_port,
         )
         sentinel.start()
         return

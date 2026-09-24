@@ -13,6 +13,8 @@ from ..defenses.syn_scan import SynScanDetector
 from ..defenses.dns_tunneling import DnsTunnelingDetector
 from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
+from ..web.state import SentinelState
+from ..web.server import LightweightWebServer
 from .engine import DiscoveryEngine
 
 
@@ -35,6 +37,9 @@ class SentinelWatchdog:
         dhcp_starvation_enabled: bool = True,
         arp_poison_enabled: bool = True,
         sync_db: bool = True,
+        web_enabled: bool = False,
+        web_host: str = "0.0.0.0",
+        web_port: int = 8080,
     ):
         self.engine = engine
         self.notifier = notifier
@@ -56,6 +61,18 @@ class SentinelWatchdog:
         self.arp_poison_enabled = arp_poison_enabled
         self.arp_guard: Optional[ArpPoisonGuard] = None
         self.sync_db = sync_db
+        self.web_enabled = web_enabled
+        self.web_host = web_host
+        self.web_port = web_port
+        self.web_state = SentinelState(interval=interval)
+        self.web_server: Optional[LightweightWebServer] = None
+
+        if self.whitelist_path:
+            try:
+                initial_wl = self.config_mgr.load_whitelist(self.whitelist_path)
+                self.web_state.initialize_from_whitelist(initial_wl)
+            except Exception:
+                pass
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -119,6 +136,35 @@ class SentinelWatchdog:
             )
             if self.arp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning & Gateway Masquerade Guard active.{Colors.RESET}")
+
+        if self.web_enabled:
+            self.web_server = LightweightWebServer(
+                state=self.web_state,
+                config_mgr=self.config_mgr,
+                whitelist_path=self.whitelist_path,
+                host=self.web_host,
+                port=self.web_port,
+            )
+            if self.web_server.start():
+                print(f"{Colors.GREEN}[+] Web Dashboard active at http://{self.web_host}:{self.web_port}{Colors.RESET}")
+
+        if self.web_state:
+            if net_info:
+                self.web_state.network_info = {
+                    "interface": getattr(net_info, "interface", ""),
+                    "local_ip": getattr(net_info, "local_ip", ""),
+                    "local_mac": getattr(net_info, "local_mac", ""),
+                    "gateway_ip": getattr(net_info, "gateway_ip", ""),
+                    "gateway_mac": getattr(net_info, "gateway_mac", ""),
+                    "subnet_cidr": getattr(net_info, "subnet_cidr", ""),
+                }
+            self.web_state.active_defenses = {
+                "honey_ports": bool(self.honey_listener),
+                "syn_scan": bool(self.syn_detector),
+                "dns_tunneling": bool(self.dns_tunnel_detector),
+                "dhcp_starvation": bool(self.dhcp_guard),
+                "arp_poison": bool(self.arp_guard),
+            }
 
         try:
             while True:
@@ -200,6 +246,21 @@ class SentinelWatchdog:
                         + dhcp_threats
                         + arp_threats
                     )
+
+                    if self.web_state:
+                        self.web_state.update_audit(
+                            devices=result.devices,
+                            threats=combined_threats,
+                            network_info=result.network,
+                            active_defenses={
+                                "honey_ports": bool(self.honey_listener),
+                                "syn_scan": bool(self.syn_detector),
+                                "dns_tunneling": bool(self.dns_tunnel_detector),
+                                "dhcp_starvation": bool(self.dhcp_guard),
+                                "arp_poison": bool(self.arp_guard),
+                            },
+                        )
+
                     new_aliens = [
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
@@ -237,6 +298,10 @@ class SentinelWatchdog:
         except KeyboardInterrupt:
             print(f"\n{Colors.CYAN}[*] Alien Hunter Sentinel terminated by user.{Colors.RESET}")
         finally:
+            if self.web_state:
+                self.web_state.is_running = False
+            if self.web_server:
+                self.web_server.stop()
             if self.honey_listener:
                 self.honey_listener.stop()
             if self.syn_detector:

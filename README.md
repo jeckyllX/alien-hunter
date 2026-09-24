@@ -113,6 +113,10 @@ alien_hunter/
 │   └── providers/        # Adapters (Ollama, OpenAI-compatible, Anthropic, Gemini)
 ├── reporting/
 │   └── console.py        # Terminal formatting and output rendering
+├── web/                  # Embedded Web UI & REST API (<2MB RAM, 0% idle CPU)
+│   ├── server.py         # Threaded HTTP server and API endpoints
+│   ├── state.py          # In-memory thread-safe state store
+│   └── ui.py             # Single-page client-rendered HTML5/JS dashboard
 └── notifications/
     ├── template.py       # AlertMessage formatting
     ├── base.py           # BaseNotificationHook interface
@@ -139,6 +143,12 @@ sudo ./alien_hunter.py --json
 
 # Run as background daemon (5-minute polling interval)
 sudo ./alien_hunter.py --watch --interval 300
+
+# Run Sentinel daemon with Web Dashboard
+sudo ./alien_hunter.py --web
+
+# Custom port for Web Dashboard
+sudo ./alien_hunter.py --web --web-port 8080
 ```
 
 ---
@@ -152,6 +162,9 @@ sudo ./alien_hunter.py --watch --interval 300
 | `--whitelist` | Interactive prompt to label and trust unrecognized devices. |
 | `-w, --watch` | Runs continuously in daemon mode with honey-port listeners. |
 | `--interval <sec>` | Polling interval in seconds for daemon mode (default: `300`). |
+| `--web` | Launches embedded web dashboard and REST API. |
+| `--web-port <port>` | Port for the web dashboard (default: `8080`). |
+| `--web-host <host>` | Host/IP to bind the web dashboard (default: `0.0.0.0`). |
 | `--sync-db` | Updates `known_devices.json` with observed ports and services (default: enabled). |
 | `--no-sync-db` | Disables automated database updates. |
 | `--notify` | Dispatches notifications to configured hooks regardless of findings. |

@@ -2,6 +2,11 @@
   "poll_interval_seconds": 300,
   "deep_scan_on_alert": true,
   "auto_sync_database": true,
+  "web_ui": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 8080
+  },
   "defenses": {
     "llmnr_canary_enabled": true,
     "dns_integrity_enabled": true,
