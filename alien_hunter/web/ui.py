@@ -461,18 +461,32 @@ function renderAlienTable() {
 }
 
 function formatLastSeen(ts) {
-  if (!ts) return '--';
+  if (!ts) return '<span style="color: var(--text-dim);">--</span>';
   try {
     const d = new Date(ts);
     if (isNaN(d.getTime())) return escapeHtml(ts.replace('T', ' ').replace('Z', ''));
+
+    // Local time formatted in browser timezone
+    const localTimeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const localDateStr = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+
     const now = new Date();
     const diffSec = Math.floor((now - d) / 1000);
-    if (diffSec < 60) return '<span style="color: var(--accent-green); font-weight: 500;">Just now</span>';
-    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
-    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
-    const days = Math.floor(diffSec / 86400);
-    if (days < 7) return `${days}d ago`;
-    return escapeHtml(d.toISOString().replace('T', ' ').substring(0, 16));
+
+    let rel = '';
+    if (diffSec < 60 && diffSec >= -5) {
+      rel = '<span style="color: var(--accent-green); font-weight: 600;">Active now</span>';
+    } else if (diffSec < 3600 && diffSec >= 0) {
+      rel = `${Math.floor(diffSec / 60)}m ago`;
+    } else if (diffSec < 86400 && diffSec >= 0) {
+      rel = `${Math.floor(diffSec / 3600)}h ago`;
+    } else if (diffSec >= 0) {
+      rel = `${Math.floor(diffSec / 86400)}d ago`;
+    } else {
+      rel = 'Active now';
+    }
+
+    return `<div style="font-family: monospace; font-size: 0.85rem; font-weight: 500;">${escapeHtml(localTimeStr)}</div><div style="font-size: 0.7rem; color: var(--text-dim);">${rel} &bull; ${escapeHtml(localDateStr)}</div>`;
   } catch (e) {
     return escapeHtml(ts.replace('T', ' ').replace('Z', ''));
   }
