@@ -161,6 +161,13 @@ class DiscoveryEngine:
                         mac = net_info.local_mac
                     break
 
+        # Check whitelist if IP belongs to a known device whose MAC was not active in Layer-2 ARP
+        if not mac and whitelist:
+            for w_mac, w_info in whitelist.items():
+                if w_info.get("primary_ip") == ip or ip in w_info.get("aliases", []):
+                    mac = w_mac
+                    break
+
         raw_hostname = dns_leases.get(ip, "")
         clean_host = RouterDnsAuditor.clean_hostname(raw_hostname) or "Unknown"
         vendor = "N/A"
@@ -372,14 +379,20 @@ class DiscoveryEngine:
         if not net_info.local_ip:
             return AuditResult(timestamp=time.time(), network=net_info)
 
-        # 1. Active Layer-2 ARP scan
+        # 1. Active Layer-2 ARP scan with candidate targets from whitelist
+        candidate_targets: Dict[str, str] = {}
+        for w_mac, w_info in whitelist.items():
+            w_ip = w_info.get("primary_ip")
+            if w_ip and w_mac and not w_mac.startswith("N/A"):
+                candidate_targets[w_ip] = w_mac
+
         arp_scanner = ArpScanner(
             interface=net_info.interface,
             local_mac=net_info.local_mac,
             local_ip=net_info.local_ip,
             subnet_cidr=net_info.subnet_cidr,
         )
-        active_devices = arp_scanner.scan()
+        active_devices = arp_scanner.scan(candidate_targets=candidate_targets)
 
         # 2. Gateway DNS lease audit (sleeping & firewalled devices)
         router_auditor = RouterDnsAuditor(net_info.gateway_ip)

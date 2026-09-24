@@ -65,8 +65,17 @@ class SentinelState:
                 dev_dict = self._device_to_dict(dev)
                 mac_upper = dev_dict.get("mac", "").upper()
                 if dev_dict.get("trusted"):
-                    dev_dict["status"] = getattr(dev, "status", "Online / Active")
-                    dev_dict["last_seen"] = now_iso
+                    dev_status = getattr(dev, "status", "Online / Active")
+                    if dev_status not in ("Online / Active", "Local Machine"):
+                        dev_status = "Offline / Asleep"
+                    dev_dict["status"] = dev_status
+
+                    if dev_status in ("Online / Active", "Local Machine"):
+                        dev_dict["last_seen"] = now_iso
+                    else:
+                        prev_last = existing_trusted.get(mac_upper, {}).get("last_seen")
+                        dev_dict["last_seen"] = prev_last
+
                     if mac_upper in existing_trusted:
                         prev = existing_trusted[mac_upper]
                         if not dev_dict.get("owner") or dev_dict.get("owner") == "User":
@@ -76,9 +85,12 @@ class SentinelState:
                         if prev.get("friendly_name") and (not dev_dict.get("friendly_name") or dev_dict.get("friendly_name") == "Unknown"):
                             dev_dict["friendly_name"] = prev["friendly_name"]
                             dev_dict["name"] = prev["friendly_name"]
+                        if not dev_dict.get("last_seen") and prev.get("last_seen"):
+                            dev_dict["last_seen"] = prev["last_seen"]
                     trusted.append(dev_dict)
                     seen_trusted_macs.add(mac_upper)
                 else:
+                    dev_dict["status"] = "Online / Active"
                     dev_dict["last_seen"] = now_iso
                     alien.append(dev_dict)
 
@@ -111,13 +123,14 @@ class SentinelState:
                         "hostname": entry.get("hostname", "Unknown"),
                         "owner": entry.get("owner", "User"),
                         "device_type": entry.get("device_type", "Generic"),
+                        "status": "Offline / Asleep",
                         "trusted": True,
                         "is_alien": False,
                         "ports": entry.get("ports", []),
                         "open_ports": entry.get("ports", []),
                         "services": entry.get("services", []),
                         "vendor": entry.get("vendor", "N/A"),
-                        "last_seen": entry.get("last_seen", ""),
+                        "last_seen": entry.get("last_seen") or None,
                         "aliases": entry.get("aliases", []),
                     }
                 )
@@ -228,7 +241,7 @@ class SentinelState:
             "mdns_services": getattr(dev, "mdns_services", []),
             "aliases": getattr(dev, "aliases", []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
-            "last_seen": getattr(dev, "last_seen", "") or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "last_seen": getattr(dev, "last_seen", None) or None,
         }
 
     @staticmethod

@@ -460,8 +460,8 @@ function renderAlienTable() {
   }).join('');
 }
 
-function formatLastSeen(ts) {
-  if (!ts) return '<span style="color: var(--text-dim);">--</span>';
+function formatLastSeen(ts, isOnline) {
+  if (!ts) return '<span style="color: var(--text-dim);">Never</span>';
   try {
     const d = new Date(ts);
     if (isNaN(d.getTime())) return escapeHtml(ts.replace('T', ' ').replace('Z', ''));
@@ -475,7 +475,9 @@ function formatLastSeen(ts) {
 
     let rel = '';
     if (diffSec < 60 && diffSec >= -5) {
-      rel = '<span style="color: var(--accent-green); font-weight: 600;">Active now</span>';
+      rel = isOnline
+        ? '<span style="color: var(--accent-green); font-weight: 600;">Active now</span>'
+        : 'Just now';
     } else if (diffSec < 3600 && diffSec >= 0) {
       rel = `${Math.floor(diffSec / 60)}m ago`;
     } else if (diffSec < 86400 && diffSec >= 0) {
@@ -483,7 +485,7 @@ function formatLastSeen(ts) {
     } else if (diffSec >= 0) {
       rel = `${Math.floor(diffSec / 86400)}d ago`;
     } else {
-      rel = 'Active now';
+      rel = isOnline ? 'Active now' : 'Recently';
     }
 
     return `<div style="font-family: monospace; font-size: 0.85rem; font-weight: 500;">${escapeHtml(localTimeStr)}</div><div style="font-size: 0.7rem; color: var(--text-dim);">${rel} &bull; ${escapeHtml(localDateStr)}</div>`;
@@ -518,8 +520,10 @@ function renderTrustedTable() {
     const hasDifferentHost = dev.hostname && dev.hostname !== 'Unknown' && dev.hostname !== friendly;
     const hostSubtitle = hasDifferentHost ? `<div style="font-size: 0.72rem; color: var(--text-dim); font-family: monospace;">Host: ${escapeHtml(dev.hostname)}</div>` : '';
     const owner = dev.owner && dev.owner !== 'User' ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${escapeHtml(dev.owner)})</span>` : '';
-    const isAsleep = dev.status && (dev.status.includes('Offline') || dev.status.includes('Asleep'));
-    const statusBadge = isAsleep ? ` <span class="badge badge-inactive" style="font-size: 0.65rem; padding: 2px 6px;">Asleep</span>` : '';
+    const isOnline = dev.status === 'Online / Active' || dev.status === 'Local Machine';
+    const statusBadge = isOnline
+      ? ` <span class="badge badge-active" style="font-size: 0.65rem; padding: 2px 6px;">Online</span>`
+      : ` <span class="badge badge-inactive" style="font-size: 0.65rem; padding: 2px 6px;">Offline</span>`;
     const ip = dev.ip || dev.primary_ip || '--';
     const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
     const aliases = aliasList.length > 0 ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${escapeHtml(aliasList.join(', '))}</div>` : '';
@@ -533,7 +537,7 @@ function renderTrustedTable() {
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
         <td>${escapeHtml(dev.vendor || 'N/A')}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
-        <td style="font-size: 0.8rem; color: var(--text-dim);" title="${escapeHtml(dev.last_seen || '')}">${formatLastSeen(dev.last_seen)}</td>
+        <td style="font-size: 0.8rem; color: var(--text-dim);" title="${escapeHtml(dev.last_seen || '')}">${formatLastSeen(dev.last_seen, isOnline)}</td>
       </tr>
     `;
   }).join('');

@@ -117,6 +117,11 @@ class ConfigManager:
             if not mac_upper or mac_upper.startswith("N/A") or mac_upper not in raw:
                 continue
 
+            # Only synchronize telemetry and update last_seen for actively observed devices
+            dev_status = getattr(dev, "status", "Online / Active")
+            if dev_status not in ("Online / Active", "Local Machine"):
+                continue
+
             entry = raw[mac_upper]
 
             # Aggregate all observed IP addresses (dev.ip + aliases)

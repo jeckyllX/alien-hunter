@@ -93,6 +93,35 @@ class TestSentinelState(unittest.TestCase):
         self.assertEqual(summary["active_defenses"], defenses)
         self.assertIsNotNone(summary["seconds_since_last_scan"])
 
+    def test_update_audit_preserves_offline_trusted_devices_and_timestamps(self):
+        sample_whitelist = {
+            "02:00:00:00:00:50": {
+                "name": "Test Laptop",
+                "owner": "User",
+                "primary_ip": "192.0.2.50",
+                "last_seen": "2026-09-20T10:00:00Z",
+            }
+        }
+        self.state.initialize_from_whitelist(sample_whitelist)
+
+        # Audit runs but Test Laptop did NOT respond (it is offline)
+        dev_active = Device(
+            ip="192.168.1.1",
+            mac="02:00:00:00:00:01",
+            hostname="gateway.lan",
+            trusted=True,
+            status="Online / Active",
+        )
+        self.state.update_audit(devices=[dev_active], threats=[])
+
+        devices = self.state.get_devices_payload()
+        trusted_map = {d["mac"]: d for d in devices["trusted"]}
+
+        self.assertIn("02:00:00:00:00:50", trusted_map)
+        laptop = trusted_map["02:00:00:00:00:50"]
+        self.assertEqual(laptop["status"], "Offline / Asleep")
+        self.assertEqual(laptop["last_seen"], "2026-09-20T10:00:00Z")
+
     def test_update_whitelist_entry(self):
         dev_alien = Device(
             ip="192.168.1.99",

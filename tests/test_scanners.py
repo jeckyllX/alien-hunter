@@ -242,5 +242,60 @@ class TestNativeArpSweeper(unittest.TestCase):
         mock_sock.close.assert_called()
 
 
+class TestArpScanner(unittest.TestCase):
+    """Tests Layer-2 ARP scanner logic, candidate unicast probing, and neighbor filtering."""
+
+    @patch("subprocess.run")
+    @patch.object(NativeArpSweeper, "sweep", return_value={})
+    def test_scan_filters_failed_and_stale_neighbors(self, mock_sweep, mock_subproc):
+        # Simulated ip neigh with 1 REACHABLE host, 1 FAILED host, and 1 STALE host
+        import json
+        neigh_json = json.dumps([
+            {"dst": "192.168.1.1", "lladdr": "02:00:00:00:00:01", "state": ["REACHABLE"]},
+            {"dst": "192.0.2.50", "lladdr": "02:00:00:00:00:50", "state": ["FAILED"]},
+            {"dst": "192.0.2.32", "lladdr": "02:00:00:00:00:32", "state": ["INCOMPLETE"]},
+        ])
+        mock_res = MagicMock()
+        mock_res.stdout = neigh_json
+        mock_res.returncode = 0
+        mock_subproc.return_value = mock_res
+
+        scanner = ArpScanner(
+            interface="eth0",
+            local_mac="00:11:22:33:44:55",
+            local_ip="192.168.1.10",
+            subnet_cidr="192.168.1.0/24",
+        )
+        devs = scanner.scan()
+
+        self.assertIn("192.168.1.1", devs)
+        self.assertNotIn("192.0.2.50", devs)
+        self.assertNotIn("192.0.2.32", devs)
+
+    @patch("subprocess.run")
+    @patch.object(NativeArpSweeper, "sweep", return_value={})
+    def test_proc_net_arp_requires_atf_com_flag(self, mock_sweep, mock_subproc):
+        mock_subproc.side_effect = Exception("ip command unavailable")
+
+        # 192.168.1.10 has 0x2 (ATF_COM - completed), 192.0.2.50 has 0x0 (failed)
+        arp_data = (
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.1.10     0x1         0x2         AA:BB:CC:DD:EE:10     *        eth0\n"
+            "192.0.2.50    0x1         0x0         02:00:00:00:00:50     *        eth0\n"
+        )
+        with patch("builtins.open", unittest.mock.mock_open(read_data=arp_data)):
+            scanner = ArpScanner(
+                interface="eth0",
+                local_mac="00:11:22:33:44:55",
+                local_ip="192.168.1.10",
+                subnet_cidr="192.168.1.0/24",
+            )
+            devs = scanner.scan()
+
+        self.assertIn("192.168.1.10", devs)
+        self.assertNotIn("192.0.2.50", devs)
+
+
 if __name__ == "__main__":
     unittest.main()
+

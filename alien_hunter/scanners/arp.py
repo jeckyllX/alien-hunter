@@ -29,10 +29,11 @@ class NativeArpSweeper:
         local_ip: str,
         subnet_cidr: str,
         timeout: float = 1.2,
+        candidate_targets: Optional[Dict[str, str]] = None,
     ) -> Dict[str, str]:
         """
-        Broadcasts ARP requests across subnet_cidr and gathers unicast replies.
-        Returns a mapping of {IP_ADDRESS: MAC_ADDRESS}.
+        Broadcasts ARP requests across subnet_cidr and unicasts ARP to candidate_targets.
+        Gathers unicast replies and returns a mapping of {IP_ADDRESS: MAC_ADDRESS}.
         """
         devices: Dict[str, str] = {}
         sock = None
@@ -51,7 +52,34 @@ class NativeArpSweeper:
 
             eth_header = b"\xff\xff\xff\xff\xff\xff" + local_mac_bytes + struct.pack("!H", 0x0806)
 
-            # Broadcast ARP requests (limit to max 512 hosts to avoid link saturation on large subnets)
+            # 1. Unicast ARP probes to candidate targets (bypasses Wi-Fi AP broadcast suppression)
+            if candidate_targets:
+                for cand_ip, cand_mac in candidate_targets.items():
+                    if cand_ip == local_ip:
+                        continue
+                    try:
+                        clean_cmac = cand_mac.replace(":", "").replace("-", "")
+                        if len(clean_cmac) != 12:
+                            continue
+                        target_mac_bytes = bytes.fromhex(clean_cmac)
+                        u_eth = target_mac_bytes + local_mac_bytes + struct.pack("!H", 0x0806)
+                        u_arp = struct.pack(
+                            "!HHBBH6s4s6s4s",
+                            1,
+                            0x0800,
+                            6,
+                            4,
+                            1,
+                            local_mac_bytes,
+                            sender_ip_bytes,
+                            target_mac_bytes,
+                            socket.inet_aton(cand_ip),
+                        )
+                        sock.send(u_eth + u_arp)
+                    except Exception:
+                        pass
+
+            # 2. Broadcast ARP requests across subnet
             host_count = 0
             for host in net.hosts():
                 target_ip = str(host)
@@ -164,7 +192,7 @@ class ArpScanner:
         except Exception:
             return None
 
-    def scan(self) -> Dict[str, str]:
+    def scan(self, candidate_targets: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         """
         Executes an ARP sweep across the local network link.
         Returns a mapping of {IP_ADDRESS: MAC_ADDRESS}.
@@ -173,12 +201,30 @@ class ArpScanner:
 
         # 1. Native raw socket ARP sweep (Zero dependencies)
         if self.interface and self.local_mac and self.local_ip and self.subnet_cidr:
+            merged_candidates = dict(candidate_targets or {})
+            try:
+                cmd_neigh = ["ip", "-json", "neigh", "show"]
+                if self.interface:
+                    cmd_neigh.extend(["dev", self.interface])
+                res = subprocess.run(cmd_neigh, capture_output=True, text=True, timeout=3)
+                if res.stdout:
+                    for entry in json.loads(res.stdout):
+                        ip = entry.get("dst")
+                        mac = entry.get("lladdr")
+                        state = entry.get("state", [])
+                        if ip and mac and "FAILED" not in state and "INCOMPLETE" not in state:
+                            if ip not in merged_candidates:
+                                merged_candidates[ip] = mac.upper()
+            except Exception:
+                pass
+
             native_devices = NativeArpSweeper.sweep(
                 interface=self.interface,
                 local_mac=self.local_mac,
                 local_ip=self.local_ip,
                 subnet_cidr=self.subnet_cidr,
                 timeout=1.2,
+                candidate_targets=merged_candidates,
             )
             if native_devices:
                 devices.update(native_devices)
@@ -200,7 +246,7 @@ class ArpScanner:
             except Exception:
                 pass
 
-        # 3. Kernel neighbor table enrichment (ip neigh)
+        # 3. Kernel neighbor table enrichment (only for REACHABLE / PERMANENT entries)
         try:
             cmd_neigh = ["ip", "-json", "neigh", "show"]
             if self.interface:
@@ -210,7 +256,7 @@ class ArpScanner:
                 cmd_neigh,
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=3,
             )
             if res.stdout:
                 entries = json.loads(res.stdout)
@@ -218,24 +264,41 @@ class ArpScanner:
                     ip = entry.get("dst")
                     mac = entry.get("lladdr")
                     state = entry.get("state", [])
-                    if ip and mac and "FAILED" not in state:
+                    if not ip or not mac:
+                        continue
+                    if "FAILED" in state or "INCOMPLETE" in state:
+                        continue
+                    # When active sweep ran, only accept explicitly confirmed REACHABLE or PERMANENT hosts
+                    if devices:
+                        if "REACHABLE" in state or "PERMANENT" in state:
+                            if ip not in devices:
+                                devices[ip] = mac.upper()
+                    else:
+                        # Fallback when raw sockets and arp-scan were unavailable
                         if ip not in devices:
                             devices[ip] = mac.upper()
         except Exception:
             pass
 
-        # 4. /proc/net/arp fallback
-        try:
-            with open("/proc/net/arp", "r", encoding="utf-8") as f:
-                lines = f.readlines()[1:]
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) >= 6:
-                        ip, hw_type, flags, mac, mask, dev = parts[:6]
-                        if (not self.interface or dev == self.interface) and mac != "00:00:00:00:00:00":
-                            if ip not in devices:
-                                devices[ip] = mac.upper()
-        except Exception:
-            pass
+        # 4. /proc/net/arp fallback (only if devices is empty, requiring ATF_COM 0x2 flag)
+        if not devices:
+            try:
+                with open("/proc/net/arp", "r", encoding="utf-8") as f:
+                    lines = f.readlines()[1:]
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) >= 6:
+                            ip, hw_type, flags, mac, mask, dev = parts[:6]
+                            try:
+                                flags_int = int(flags, 16)
+                            except ValueError:
+                                continue
+                            if not (flags_int & 0x02):  # ATF_COM (0x02) - Completed entry
+                                continue
+                            if (not self.interface or dev == self.interface) and mac != "00:00:00:00:00:00":
+                                if ip not in devices:
+                                    devices[ip] = mac.upper()
+            except Exception:
+                pass
 
         return devices

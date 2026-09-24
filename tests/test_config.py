@@ -105,6 +105,34 @@ class TestConfigManager(unittest.TestCase):
         )
         self.assertFalse(sentinel_no_sync.sync_db)
 
+    def test_sync_device_inventory_skips_offline_devices(self):
+        initial_whitelist = {
+            "02:00:00:00:00:50": {
+                "name": "Test Laptop",
+                "owner": "User",
+                "primary_ip": "192.0.2.50",
+                "last_seen": "2026-09-20T10:00:00Z",
+            }
+        }
+        self.config_mgr.save_whitelist(initial_whitelist, self.whitelist_file)
+
+        dev_offline = SimpleNamespace(
+            mac="02:00:00:00:00:50",
+            ip="192.0.2.50",
+            status="Offline / Asleep",
+        )
+
+        success = self.config_mgr.sync_device_inventory(
+            devices=[dev_offline],
+            custom_path=self.whitelist_file,
+            subnet_cidr="192.168.1.0/24",
+        )
+        self.assertTrue(success)
+
+        reloaded = self.config_mgr.load_whitelist(self.whitelist_file)
+        # last_seen timestamp must not have been modified for offline host
+        self.assertEqual(reloaded["02:00:00:00:00:50"]["last_seen"], "2026-09-20T10:00:00Z")
+
 
 if __name__ == "__main__":
     unittest.main()
