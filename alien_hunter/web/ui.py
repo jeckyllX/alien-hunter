@@ -339,9 +339,28 @@ let cachedAlien = [];
 async function fetchData() {
   try {
     const [resStatus, resDevices] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/devices').then(r => r.json())
+      fetch('/api/status').then(r => {
+        if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch('/api/devices').then(r => {
+        if (!r.ok) throw new Error(`Devices HTTP ${r.status}`);
+        return r.json();
+      })
     ]);
+
+    // Update daemon status indicator
+    const pill = document.getElementById('statusPill');
+    const statusText = document.getElementById('daemonStatusText');
+    if (resStatus.is_running) {
+      statusText.textContent = 'ONLINE';
+      pill.style.borderColor = 'rgba(16, 185, 129, 0.3)';
+      pill.style.color = 'var(--accent-green)';
+    } else {
+      statusText.textContent = 'STOPPED';
+      pill.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+      pill.style.color = 'var(--accent-red)';
+    }
 
     // Status updates
     document.getElementById('valUptime').textContent = resStatus.uptime_human || '--';
@@ -354,13 +373,15 @@ async function fetchData() {
     const net = resStatus.network || {};
     document.getElementById('valIface').textContent = net.interface || 'auto';
     document.getElementById('valGateway').textContent = `Gateway: ${net.gateway_ip || 'N/A'}`;
-    document.getElementById('valTrustedCount').textContent = resStatus.counts.trusted_devices;
-    document.getElementById('valAlienCount').textContent = resStatus.counts.alien_devices;
+    const counts = resStatus.counts || {};
+    document.getElementById('valTrustedCount').textContent = counts.trusted_devices !== undefined ? counts.trusted_devices : (resDevices.trusted || []).length;
+    document.getElementById('valAlienCount').textContent = counts.alien_devices !== undefined ? counts.alien_devices : (resDevices.alien || []).length;
 
     // Defense badges
     const defs = resStatus.active_defenses || {};
+    const honeyDetail = Array.isArray(defs.honey_ports) ? defs.honey_ports.join(', ') : '';
     const badgeMap = [
-      { key: 'honey_ports', label: 'Honey-Ports', detail: defs.honey_ports ? defs.honey_ports.join(',') : '' },
+      { key: 'honey_ports', label: 'Honey-Ports', detail: honeyDetail },
       { key: 'syn_scan', label: 'Stealth SYN Scan' },
       { key: 'dns_tunneling', label: 'DNS Tunneling' },
       { key: 'dhcp_starvation', label: 'DHCP Starvation' },
@@ -368,7 +389,8 @@ async function fetchData() {
     ];
     let badgesHtml = '';
     badgeMap.forEach(b => {
-      const active = Boolean(defs[b.key]);
+      const val = defs[b.key];
+      const active = Boolean(val && (Array.isArray(val) ? val.length > 0 : true));
       const cls = active ? 'badge-active' : 'badge-inactive';
       const mark = active ? '● ' : '○ ';
       const extra = b.detail ? ` (${b.detail})` : '';
@@ -389,14 +411,17 @@ async function fetchData() {
     }
 
     // Devices
-    cachedTrusted = resDevices.trusted || [];
-    cachedAlien = resDevices.alien || [];
+    cachedTrusted = Array.isArray(resDevices.trusted) ? resDevices.trusted : [];
+    cachedAlien = Array.isArray(resDevices.alien) ? resDevices.alien : [];
 
     renderAlienTable();
     renderTrustedTable();
   } catch (err) {
-    document.getElementById('daemonStatusText').textContent = 'CONNECTING...';
-    document.getElementById('statusPill').style.borderColor = 'rgba(245, 158, 11, 0.4)';
+    console.error('Fetch error:', err);
+    document.getElementById('daemonStatusText').textContent = 'OFFLINE';
+    const pill = document.getElementById('statusPill');
+    pill.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+    pill.style.color = 'var(--accent-red)';
   }
 }
 
@@ -413,16 +438,20 @@ function renderAlienTable() {
 
   panel.style.display = 'block';
   tbody.innerHTML = cachedAlien.map(dev => {
-    const ports = (dev.open_ports || []).join(', ') || 'None open';
+    const portList = Array.isArray(dev.open_ports) ? dev.open_ports : (Array.isArray(dev.ports) ? dev.ports : []);
+    const ports = portList.join(', ') || 'None open';
+    const ip = escapeHtml(dev.ip || '');
+    const mac = escapeHtml(dev.mac || '');
+    const name = escapeHtml(dev.hostname || dev.vendor || '');
     return `
       <tr>
-        <td class="mono" style="font-weight: 600;">${dev.ip}</td>
-        <td class="mono">${dev.mac}</td>
+        <td class="mono" style="font-weight: 600;">${ip}</td>
+        <td class="mono">${mac}</td>
         <td>${escapeHtml(dev.vendor || 'Unknown')}</td>
         <td>${escapeHtml(dev.hostname || dev.discovery_method || 'Unknown')}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
         <td>
-          <button class="btn-success" onclick="openWhitelistModal('${dev.mac}', '${dev.ip}', '${escapeHtml(dev.hostname || dev.vendor || '')}')">
+          <button class="btn-success" onclick="openWhitelistModal('${mac}', '${ip}', '${name}')">
             ➕ Whitelist
           </button>
         </td>
@@ -453,17 +482,19 @@ function renderTrustedTable() {
 
   tbody.innerHTML = filtered.map(dev => {
     const name = dev.name || dev.hostname || 'Device';
-    const owner = dev.owner ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${dev.owner})</span>` : '';
+    const owner = dev.owner ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(${escapeHtml(dev.owner)})</span>` : '';
     const ip = dev.ip || dev.primary_ip || '--';
-    const aliases = (dev.aliases && dev.aliases.length > 0) ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${dev.aliases.join(', ')}</div>` : '';
-    const ports = (dev.ports || dev.open_ports || []).join(', ') || '--';
+    const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
+    const aliases = aliasList.length > 0 ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${escapeHtml(aliasList.join(', '))}</div>` : '';
+    const portList = Array.isArray(dev.ports) ? dev.ports : (Array.isArray(dev.open_ports) ? dev.open_ports : []);
+    const ports = portList.join(', ') || '--';
     const lastSeen = dev.last_seen ? dev.last_seen.replace('T', ' ').replace('Z', '') : '--';
 
     return `
       <tr>
         <td><strong>${escapeHtml(name)}</strong>${owner}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
-        <td class="mono">${escapeHtml(dev.mac)}</td>
+        <td class="mono">${escapeHtml(dev.mac || '')}</td>
         <td>${escapeHtml(dev.vendor || 'N/A')}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
         <td style="font-size: 0.75rem; color: var(--text-dim);">${escapeHtml(lastSeen)}</td>

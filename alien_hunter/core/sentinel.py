@@ -159,7 +159,7 @@ class SentinelWatchdog:
                     "subnet_cidr": getattr(net_info, "subnet_cidr", ""),
                 }
             self.web_state.active_defenses = {
-                "honey_ports": bool(self.honey_listener),
+                "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
                 "syn_scan": bool(self.syn_detector),
                 "dns_tunneling": bool(self.dns_tunnel_detector),
                 "dhcp_starvation": bool(self.dhcp_guard),
@@ -253,7 +253,7 @@ class SentinelWatchdog:
                             threats=combined_threats,
                             network_info=result.network,
                             active_defenses={
-                                "honey_ports": bool(self.honey_listener),
+                                "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
                                 "syn_scan": bool(self.syn_detector),
                                 "dns_tunneling": bool(self.dns_tunnel_detector),
                                 "dhcp_starvation": bool(self.dhcp_guard),
