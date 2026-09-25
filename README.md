@@ -14,6 +14,19 @@ Standard ICMP ping sweeps often miss active devices on local networks due to:
 
 ---
 
+## Web Dashboard
+
+Alien Hunter includes a built-in single-page web dashboard and REST API served directly via Python standard library `http.server` (zero external dependencies):
+
+![Alien Hunter Web Dashboard](docs/screenshots/dashboard.png)
+
+* **Real-Time Telemetry:** Live uptime, interface configuration, scan cycles, and defense posture.
+* **Intrusion Alerts:** Immediate banner alerts for honey-port trips, SYN sweeps, DNS tunneling, and ARP poisoning.
+* **Alien Device Management:** Segregated view for untrusted network devices with one-click whitelisting.
+* **Device Inventory Baselines:** Online and offline tracking, port drift auditing, service baselines, and timestamp history.
+
+---
+
 ## Capabilities
 
 ### Network Discovery
