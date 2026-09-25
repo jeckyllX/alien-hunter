@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--version", action="version", version=f"Alien Hunter v{__version__}")
     parser.add_argument("--whitelist-file", type=str, default="", help="Custom path to known_devices.json whitelist")
     parser.add_argument("--config-file", type=str, default="", help="Custom path to config.json")
+    parser.add_argument("--events-file", type=str, default="", help="Custom path to events.jsonl audit log")
     parser.add_argument("-i", "--interface", type=str, default="", help="Network interface to scan (default: auto-detected)")
     parser.add_argument("--deep", action="store_true", help="Perform deep port and vulnerability scanning on all hosts")
     parser.add_argument("--whitelist", action="store_true", help="Interactively add newly detected alien devices to whitelist")
@@ -69,6 +70,7 @@ def main():
     config_mgr = ConfigManager()
     whitelist_path = config_mgr.resolve_path("known_devices.json", args.whitelist_file)
     config_path = config_mgr.resolve_path("config.json", args.config_file)
+    events_path = config_mgr.resolve_path("events.jsonl", args.events_file)
 
     whitelist = config_mgr.load_whitelist(whitelist_path)
     config = config_mgr.load_config(config_path)
@@ -195,6 +197,7 @@ def main():
             notifier=notifier,
             config_mgr=config_mgr,
             whitelist_path=whitelist_path,
+            events_path=events_path,
             interval=args.interval,
             deep_scan=args.deep,
             interface=selected_interface,

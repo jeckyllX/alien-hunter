@@ -109,6 +109,10 @@ button:hover { background: var(--bg-elevated); border-color: var(--accent-cyan);
 .badge-active { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
 .badge-inactive { background: rgba(148, 163, 184, 0.1); color: var(--text-dim); border: 1px solid var(--border); }
 .badge-red { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-sev-critical { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+.badge-sev-warn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); }
+.badge-sev-info { background: rgba(6, 182, 212, 0.15); color: #38bdf8; border: 1px solid rgba(6, 182, 212, 0.35); }
+.badge-type { background: rgba(255, 255, 255, 0.05); color: var(--text-dim); border: 1px solid var(--border); font-family: monospace; font-size: 0.7rem; }
 .section-header {
   display: flex;
   justify-content: space-between;
@@ -287,6 +291,40 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
       </table>
     </div>
   </div>
+
+  <div class="card" style="margin-top: 24px;">
+    <div class="section-header" style="margin: 0 0 12px 0;">
+      <div class="section-title">
+        <span>📋 Security Event Timeline</span>
+        <span class="badge badge-active" id="eventsBadgeCount">0</span>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <select id="eventSeverityFilter" onchange="renderEventsTable()">
+          <option value="ALL" selected>All Severities</option>
+          <option value="CRITICAL">Critical</option>
+          <option value="WARN">Warnings</option>
+          <option value="INFO">Info</option>
+        </select>
+        <input type="text" id="eventsSearch" placeholder="Search events..." oninput="renderEventsTable()">
+      </div>
+    </div>
+    <div style="overflow-x: auto;">
+      <table>
+        <thead>
+          <tr>
+            <th style="width: 140px;">Time</th>
+            <th style="width: 95px;">Severity</th>
+            <th style="width: 155px;">Event Type</th>
+            <th>Summary / Details</th>
+            <th style="width: 190px;">Target Device</th>
+          </tr>
+        </thead>
+        <tbody id="eventsTableBody">
+          <tr><td colspan="5" class="empty-msg">No security events recorded yet.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
 </div>
 
 <div class="modal-overlay" id="whitelistModal">
@@ -335,16 +373,21 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
 let pollTimer = null;
 let cachedTrusted = [];
 let cachedAlien = [];
+let cachedEvents = [];
 
 async function fetchData() {
   try {
-    const [resStatus, resDevices] = await Promise.all([
+    const [resStatus, resDevices, resEvents] = await Promise.all([
       fetch('/api/status').then(r => {
         if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
         return r.json();
       }),
       fetch('/api/devices').then(r => {
         if (!r.ok) throw new Error(`Devices HTTP ${r.status}`);
+        return r.json();
+      }),
+      fetch('/api/events?limit=100').then(r => {
+        if (!r.ok) throw new Error(`Events HTTP ${r.status}`);
         return r.json();
       })
     ]);
@@ -410,12 +453,14 @@ async function fetchData() {
       threatList.innerHTML = '';
     }
 
-    // Devices
+    // Devices and Events
     cachedTrusted = Array.isArray(resDevices.trusted) ? resDevices.trusted : [];
     cachedAlien = Array.isArray(resDevices.alien) ? resDevices.alien : [];
+    cachedEvents = Array.isArray(resEvents.events) ? resEvents.events : [];
 
     renderAlienTable();
     renderTrustedTable();
+    renderEventsTable();
   } catch (err) {
     console.error('Fetch error:', err);
     document.getElementById('daemonStatusText').textContent = 'OFFLINE';
@@ -586,6 +631,92 @@ function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3500);
+}
+
+function renderEventsTable() {
+  const tbody = document.getElementById('eventsTableBody');
+  const countBadge = document.getElementById('eventsBadgeCount');
+  countBadge.textContent = cachedEvents.length;
+
+  const sevFilter = (document.getElementById('eventSeverityFilter').value || 'ALL').toUpperCase();
+  const query = (document.getElementById('eventsSearch').value || '').toLowerCase().trim();
+
+  const filtered = cachedEvents.filter(ev => {
+    if (sevFilter !== 'ALL' && (ev.severity || '').toUpperCase() !== sevFilter) {
+      return false;
+    }
+    if (!query) return true;
+    const title = (ev.title || '').toLowerCase();
+    const desc = (ev.description || '').toLowerCase();
+    const devName = (ev.device_name || '').toLowerCase();
+    const ip = (ev.ip || '').toLowerCase();
+    const mac = (ev.mac || '').toLowerCase();
+    const evType = (ev.event_type || '').toLowerCase();
+    return title.includes(query) || desc.includes(query) || devName.includes(query) || ip.includes(query) || mac.includes(query) || evType.includes(query);
+  });
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty-msg">${cachedEvents.length === 0 ? 'No security events recorded yet.' : 'No events match your search criteria.'}</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(ev => {
+    const sev = (ev.severity || 'INFO').toUpperCase();
+    let sevBadge = '<span class="badge badge-sev-info">INFO</span>';
+    if (sev === 'CRITICAL') {
+      sevBadge = '<span class="badge badge-sev-critical">CRITICAL</span>';
+    } else if (sev === 'WARN' || sev === 'WARNING') {
+      sevBadge = '<span class="badge badge-sev-warn">WARN</span>';
+    }
+
+    const typeStr = escapeHtml(ev.event_type || 'EVENT');
+    const titleStr = escapeHtml(ev.title || 'Security Event');
+    const descStr = escapeHtml(ev.description || '');
+    const timeHtml = formatEventTime(ev.timestamp);
+
+    let targetHtml = '<span style="color: var(--text-dim);">--</span>';
+    if (ev.device_name || ev.ip || ev.mac) {
+      const parts = [];
+      if (ev.device_name) parts.push(`<strong>${escapeHtml(ev.device_name)}</strong>`);
+      if (ev.ip) parts.push(`<span class="mono">${escapeHtml(ev.ip)}</span>`);
+      if (ev.mac) parts.push(`<span class="mono" style="font-size: 0.72rem; color: var(--text-dim);">${escapeHtml(ev.mac)}</span>`);
+      targetHtml = parts.join('<br>');
+    }
+
+    return `
+      <tr>
+        <td>${timeHtml}</td>
+        <td>${sevBadge}</td>
+        <td><span class="badge badge-type">${typeStr}</span></td>
+        <td>
+          <div style="font-weight: 600; color: var(--text-main); margin-bottom: 2px;">${titleStr}</div>
+          <div style="font-size: 0.8rem; color: var(--text-dim);">${descStr}</div>
+        </td>
+        <td>${targetHtml}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function formatEventTime(ts) {
+  if (!ts) return '<span style="color: var(--text-dim);">--</span>';
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return `<span class="mono">${escapeHtml(ts)}</span>`;
+    const localTime = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const localDate = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const now = new Date();
+    const diffSec = Math.floor((now - d) / 1000);
+    let rel = '';
+    if (diffSec < 60 && diffSec >= -5) rel = 'Just now';
+    else if (diffSec < 3600 && diffSec >= 0) rel = `${Math.floor(diffSec / 60)}m ago`;
+    else if (diffSec < 86400 && diffSec >= 0) rel = `${Math.floor(diffSec / 3600)}h ago`;
+    else if (diffSec >= 0) rel = `${Math.floor(diffSec / 86400)}d ago`;
+    else rel = 'Recently';
+    return `<div class="mono" style="font-size: 0.82rem; font-weight: 500;">${escapeHtml(localTime)}</div><div style="font-size: 0.7rem; color: var(--text-dim);">${rel} &bull; ${escapeHtml(localDate)}</div>`;
+  } catch (e) {
+    return `<span class="mono">${escapeHtml(ts)}</span>`;
+  }
 }
 
 function updatePolling() {

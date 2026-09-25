@@ -15,6 +15,7 @@ from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
 from ..web.state import SentinelState
 from ..web.server import LightweightWebServer
+from ..events import EventManager
 from .engine import DiscoveryEngine
 
 
@@ -27,6 +28,7 @@ class SentinelWatchdog:
         notifier: NotificationEngine,
         config_mgr: ConfigManager,
         whitelist_path: Optional[str] = None,
+        events_path: Optional[str] = None,
         interval: int = 300,
         deep_scan: bool = False,
         interface: Optional[str] = None,
@@ -45,6 +47,7 @@ class SentinelWatchdog:
         self.notifier = notifier
         self.config_mgr = config_mgr
         self.whitelist_path = whitelist_path
+        self.events_path = events_path
         self.interval = interval
         self.deep_scan = deep_scan
         self.interface = interface
@@ -64,7 +67,8 @@ class SentinelWatchdog:
         self.web_enabled = web_enabled
         self.web_host = web_host
         self.web_port = web_port
-        self.web_state = SentinelState(interval=interval)
+        event_mgr = EventManager(log_path=events_path) if events_path else EventManager()
+        self.web_state = SentinelState(interval=interval, event_manager=event_mgr)
         self.web_server: Optional[LightweightWebServer] = None
 
         if self.whitelist_path:

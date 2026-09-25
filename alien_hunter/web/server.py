@@ -15,7 +15,7 @@ except ImportError:
     ThreadingHTTPServer = HTTPServer  # type: ignore
 
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from .state import SentinelState
 from .ui import DASHBOARD_HTML
@@ -72,6 +72,20 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json_response(200, state.get_devices_payload())
             else:
                 self._send_json_response(503, {"error": "State unavailable"})
+        elif path == "/api/events":
+            state: Optional[SentinelState] = getattr(self.server, "state", None)
+            if state:
+                query = parse_qs(parsed.query)
+                limit = 100
+                if "limit" in query:
+                    try:
+                        limit = max(1, min(500, int(query["limit"][0])))
+                    except (ValueError, TypeError):
+                        limit = 100
+                event_type = query.get("type", [None])[0]
+                self._send_json_response(200, state.get_events_payload(limit=limit, event_type=event_type))
+            else:
+                self._send_json_response(503, {"error": "State unavailable"})
         else:
             self._send_json_response(404, {"error": "Not Found"})
 
@@ -87,7 +101,7 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
             self.end_headers()
-        elif path in ("/api/status", "/api/devices"):
+        elif path in ("/api/status", "/api/devices", "/api/events"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")

@@ -9,6 +9,7 @@ from .models import Device, NetworkInfo, AuditResult
 from .core.engine import DiscoveryEngine
 from .core.sentinel import SentinelWatchdog
 from .config import ConfigManager
+from .events import EventManager, SecurityEvent
 
 __all__ = [
     "__version__",
@@ -18,4 +19,6 @@ __all__ = [
     "DiscoveryEngine",
     "SentinelWatchdog",
     "ConfigManager",
+    "EventManager",
+    "SecurityEvent",
 ]

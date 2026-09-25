@@ -1,6 +1,8 @@
 # Personal device databases and webhooks (NEVER commit personal data)
 known_devices.json
 config.json
+events.jsonl
+*.jsonl
 TODO.md
 AGENTS.md
 CODE_REVIEW.md

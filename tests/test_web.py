@@ -153,6 +153,65 @@ class TestSentinelState(unittest.TestCase):
         self.assertTrue(trusted_dev["trusted"])
         self.assertFalse(trusted_dev["is_alien"])
 
+    def test_events_transitions_and_aliens(self):
+        # Initial scan: dev_trusted online, dev_sleeping offline
+        dev_trusted = Device(
+            ip="192.168.1.1",
+            mac="11:22:33:44:55:66",
+            hostname="router.lan",
+            trusted=True,
+            is_alien=False,
+        )
+        dev_sleeping = Device(
+            ip="192.168.1.50",
+            mac="22:33:44:55:66:77",
+            hostname="laptop.lan",
+            trusted=True,
+            is_alien=False,
+            status="Offline / Asleep",
+        )
+        self.state.update_audit(devices=[dev_trusted, dev_sleeping], threats=[])
+        # Initial scan should seed state without transition spam
+        initial_events = self.state.get_events_payload()["events"]
+        self.assertEqual(len(initial_events), 0)
+
+        # Subsequent scan: laptop comes online, router goes offline, new alien detected
+        dev_laptop_online = Device(
+            ip="192.168.1.50",
+            mac="22:33:44:55:66:77",
+            hostname="laptop.lan",
+            trusted=True,
+            is_alien=False,
+            status="Online / Active",
+        )
+        dev_alien = Device(
+            ip="192.168.1.99",
+            mac="AA:BB:CC:DD:EE:FF",
+            hostname="intruder.lan",
+            trusted=False,
+            is_alien=True,
+            open_ports=["22/SSH", "80/HTTP"],
+        )
+        # router is missing from scan, so it transitions to Offline / Asleep
+        self.state.update_audit(
+            devices=[dev_laptop_online, dev_alien],
+            threats=["Stealth TCP SYN scan detected from 192.168.1.99"],
+        )
+
+        events_payload = self.state.get_events_payload()
+        self.assertGreaterEqual(events_payload["count"], 3)
+        event_types = [e["event_type"] for e in events_payload["events"]]
+        self.assertIn("DEVICE_ONLINE", event_types)
+        self.assertIn("DEVICE_OFFLINE", event_types)
+        self.assertIn("ALIEN_DETECTED", event_types)
+        self.assertIn("SYN_SCAN_DETECTED", event_types)
+
+        # Whitelisting the alien device generates DEVICE_WHITELISTED
+        self.state.update_whitelist_entry("AA:BB:CC:DD:EE:FF", {"name": "Approved Intruder", "owner": "Admin"})
+        updated_payload = self.state.get_events_payload()
+        updated_types = [e["event_type"] for e in updated_payload["events"]]
+        self.assertIn("DEVICE_WHITELISTED", updated_types)
+
     def test_format_uptime(self):
         self.assertEqual(SentinelState._format_uptime(45), "45s")
         self.assertEqual(SentinelState._format_uptime(125), "2m 5s")
@@ -320,6 +379,35 @@ class TestLightweightWebServer(unittest.TestCase):
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req, timeout=3)
         self.assertEqual(ctx.exception.code, 400)
+
+    def test_get_api_events(self):
+        self.state.event_mgr.record(
+            event_type="DEVICE_ONLINE",
+            severity="INFO",
+            title="Device Active",
+            description="Testing API",
+            ip="192.168.1.10",
+        )
+        req = Request(f"{self.base_url}/api/events")
+        with urlopen(req, timeout=3) as res:
+            self.assertEqual(res.status, 200)
+            self.assertEqual(res.headers.get("Content-Type"), "application/json")
+            data = json.loads(res.read().decode("utf-8"))
+            self.assertIn("count", data)
+            self.assertIn("events", data)
+            self.assertGreaterEqual(data["count"], 1)
+            self.assertEqual(data["events"][0]["title"], "Device Active")
+
+        # Test limit query param
+        req_limit = Request(f"{self.base_url}/api/events?limit=1")
+        with urlopen(req_limit, timeout=3) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            self.assertLessEqual(len(data["events"]), 1)
+
+        # Test HEAD request
+        head_req = Request(f"{self.base_url}/api/events", method="HEAD")
+        with urlopen(head_req, timeout=3) as res:
+            self.assertEqual(res.status, 200)
 
     def test_404_not_found(self):
         req = Request(f"{self.base_url}/api/non_existent_endpoint")
