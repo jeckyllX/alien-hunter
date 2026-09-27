@@ -116,6 +116,23 @@ class TestEventManager(unittest.TestCase):
         for ev in aliens:
             self.assertEqual(ev["event_type"], "ALIEN_DETECTED")
 
+        # Test MAC and IP filtering
+        mgr.record(
+            event_type="DEVICE_ONLINE",
+            severity="INFO",
+            title="Target Device Event",
+            description="Mac filtering test",
+            mac="AA:BB:CC:DD:EE:FF",
+            ip="192.168.1.55",
+        )
+        mac_events = mgr.get_events(mac="aa:bb:cc:dd:ee:ff")
+        self.assertEqual(len(mac_events), 1)
+        self.assertEqual(mac_events[0]["title"], "Target Device Event")
+
+        ip_events = mgr.get_events(ip="192.168.1.55")
+        self.assertEqual(len(ip_events), 1)
+        self.assertEqual(ip_events[0]["title"], "Target Device Event")
+
     def test_max_memory_entries_capping(self):
         mgr = EventManager(max_memory_entries=5)
         for i in range(10):

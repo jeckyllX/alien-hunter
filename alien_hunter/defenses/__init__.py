@@ -10,6 +10,7 @@ from .honey_port import HoneyPortListener, HoneyPortEvent
 from .honey_auth import HoneyAuthTrap
 from .syn_scan import SynScanDetector, SynScanEvent
 from .dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
+from .icmp_redirect import IcmpRedirectGuard, IcmpRedirectEvent
 
 __all__ = [
     "LlmnrCanaryTrap",
@@ -25,4 +26,6 @@ __all__ = [
     "SynScanEvent",
     "DnsTunnelingDetector",
     "DnsTunnelingEvent",
+    "IcmpRedirectGuard",
+    "IcmpRedirectEvent",
 ]

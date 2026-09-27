@@ -83,7 +83,12 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
                     except (ValueError, TypeError):
                         limit = 100
                 event_type = query.get("type", [None])[0]
-                self._send_json_response(200, state.get_events_payload(limit=limit, event_type=event_type))
+                mac = query.get("mac", [None])[0]
+                ip = query.get("ip", [None])[0]
+                self._send_json_response(
+                    200,
+                    state.get_events_payload(limit=limit, event_type=event_type, mac=mac, ip=ip),
+                )
             else:
                 self._send_json_response(503, {"error": "State unavailable"})
         else:

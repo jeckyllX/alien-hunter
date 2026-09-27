@@ -196,6 +196,10 @@ class SentinelState:
             ev_type = "ARP_POISON_DETECTED"
             sev = "CRITICAL"
             title = "ARP Cache Poisoning Detected"
+        elif "icmp route hijacking" in low or "icmp redirect" in low:
+            ev_type = "ICMP_REDIRECT_DETECTED"
+            sev = "CRITICAL"
+            title = "ICMP Route Hijacking Detected"
         elif "port drift" in low:
             ev_type = "PORT_DRIFT"
             sev = "WARN"
@@ -340,9 +344,15 @@ class SentinelState:
                 "alien": list(self.alien_devices),
             }
 
-    def get_events_payload(self, limit: int = 100, event_type: Optional[str] = None) -> Dict[str, Any]:
+    def get_events_payload(
+        self,
+        limit: int = 100,
+        event_type: Optional[str] = None,
+        mac: Optional[str] = None,
+        ip: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Returns JSON-serializable list of recent security events."""
-        events = self.event_mgr.get_events(limit=limit, event_type=event_type)
+        events = self.event_mgr.get_events(limit=limit, event_type=event_type, mac=mac, ip=ip)
         return {
             "count": len(events),
             "events": events,
@@ -364,6 +374,7 @@ class SentinelState:
             "display_name": getattr(dev, "display_name", name),
             "hostname": hostname,
             "owner": getattr(dev, "owner", "User"),
+            "device_type": getattr(dev, "device_type", "Generic"),
             "vendor": getattr(dev, "vendor", "N/A"),
             "status": getattr(dev, "status", "Online / Active"),
             "trusted": getattr(dev, "trusted", False),
@@ -373,6 +384,7 @@ class SentinelState:
             "threats": getattr(dev, "threats", []),
             "notes": getattr(dev, "notes", []),
             "mdns_services": getattr(dev, "mdns_services", []),
+            "ws_types": getattr(dev, "ws_types", []),
             "aliases": getattr(dev, "aliases", []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
             "last_seen": getattr(dev, "last_seen", None) or None,
