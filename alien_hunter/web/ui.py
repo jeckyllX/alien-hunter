@@ -153,6 +153,14 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
   padding: 20px;
   box-shadow: 0 10px 25px rgba(0,0,0,0.5);
 }
+.modal-lg { max-width: 720px; width: 100%; max-height: 88vh; overflow-y: auto; }
+.detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 16px; background: rgba(0,0,0,0.25); padding: 14px; border-radius: 6px; border: 1px solid var(--border); }
+.detail-item label { display: block; font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 2px; letter-spacing: 0.5px; }
+.detail-item div { font-size: 0.85rem; color: var(--text-main); }
+.detail-section { margin-bottom: 16px; }
+.detail-section-title { font-size: 0.8rem; text-transform: uppercase; color: var(--text-dim); letter-spacing: 0.5px; margin-bottom: 6px; font-weight: 600; }
+tr.clickable-row { cursor: pointer; transition: background 0.15s ease; }
+tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
 .modal h3 { margin-bottom: 14px; font-size: 1.1rem; }
 .form-group { margin-bottom: 12px; }
 .form-group label { display: block; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
@@ -367,6 +375,88 @@ tr:hover { background: rgba(255, 255, 255, 0.02); }
   </div>
 </div>
 
+<div class="modal-overlay" id="deviceDetailsModal" onclick="handleDetailsBackdropClick(event)">
+  <div class="modal modal-lg">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+      <div>
+        <h3 id="detailDeviceTitle" style="margin-bottom: 2px;">Device Telemetry</h3>
+        <div id="detailDeviceSubtitle" class="mono" style="font-size: 0.8rem; color: var(--text-dim);"></div>
+      </div>
+      <button type="button" onclick="closeDeviceDetailsModal()" style="padding: 2px 8px; font-size: 1.2rem; line-height: 1;">&times;</button>
+    </div>
+
+    <div id="detailBadges" style="margin-bottom: 14px;"></div>
+
+    <div class="detail-grid">
+      <div class="detail-item">
+        <label>Primary IP Address</label>
+        <div id="detailIp" class="mono">--</div>
+      </div>
+      <div class="detail-item">
+        <label>MAC Address</label>
+        <div id="detailMac" class="mono">--</div>
+      </div>
+      <div class="detail-item">
+        <label>Hardware Vendor</label>
+        <div id="detailVendor">--</div>
+      </div>
+      <div class="detail-item">
+        <label>Hostname</label>
+        <div id="detailHostname" class="mono">--</div>
+      </div>
+      <div class="detail-item">
+        <label>Device Type & Owner</label>
+        <div id="detailOwnerType">--</div>
+      </div>
+      <div class="detail-item">
+        <label>Discovery & Status</label>
+        <div id="detailDiscoveryStatus">--</div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <div class="detail-section-title">Open TCP/UDP Ports & Services</div>
+      <div id="detailPorts" class="ports-list" style="font-size: 0.85rem;">None open</div>
+    </div>
+
+    <div class="detail-section" id="detailMdnsSection">
+      <div class="detail-section-title">Discovered mDNS / Bonjour Services</div>
+      <div id="detailMdns" style="font-size: 0.82rem; color: var(--text-main);">None observed</div>
+    </div>
+
+    <div class="detail-section" id="detailThreatsSection" style="display: none;">
+      <div class="detail-section-title" style="color: var(--accent-red);">Active Threats / Notes</div>
+      <div id="detailThreats" style="font-size: 0.82rem; color: #fca5a5;"></div>
+    </div>
+
+    <div class="detail-section" style="margin-top: 18px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <div class="detail-section-title" style="margin-bottom: 0;">Device Security Event Timeline</div>
+        <span id="detailEventsBadge" class="badge badge-active" style="font-size: 0.7rem;">0 events</span>
+      </div>
+      <div style="max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px;">
+        <table>
+          <thead>
+            <tr>
+              <th style="width: 120px;">Time</th>
+              <th style="width: 80px;">Severity</th>
+              <th style="width: 130px;">Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody id="detailEventsTableBody">
+            <tr><td colspan="4" class="empty-msg" style="padding: 12px;">No security events recorded for this device.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="modal-actions" id="detailModalActions">
+      <button type="button" onclick="closeDeviceDetailsModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toastMsg"></div>
 
 <script>
@@ -428,7 +518,8 @@ async function fetchData() {
       { key: 'syn_scan', label: 'Stealth SYN Scan' },
       { key: 'dns_tunneling', label: 'DNS Tunneling' },
       { key: 'dhcp_starvation', label: 'DHCP Starvation' },
-      { key: 'arp_poison', label: 'ARP Poison Guard' }
+      { key: 'arp_poison', label: 'ARP Poison Guard' },
+      { key: 'icmp_redirect', label: 'ICMP Redirect Guard' }
     ];
     let badgesHtml = '';
     badgeMap.forEach(b => {
@@ -489,14 +580,14 @@ function renderAlienTable() {
     const mac = escapeHtml(dev.mac || '');
     const name = escapeHtml(dev.hostname || dev.vendor || '');
     return `
-      <tr>
+      <tr class="clickable-row" onclick="openDeviceDetails('${mac}')" title="Click to view full device telemetry and history">
         <td class="mono" style="font-weight: 600;">${ip}</td>
         <td class="mono">${mac}</td>
         <td>${escapeHtml(dev.vendor || 'Unknown')}</td>
         <td>${escapeHtml(dev.hostname || dev.discovery_method || 'Unknown')}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
         <td>
-          <button class="btn-success" onclick="openWhitelistModal('${mac}', '${ip}', '${name}')">
+          <button class="btn-success" onclick="event.stopPropagation(); openWhitelistModal('${mac}', '${ip}', '${name}')">
             ➕ Whitelist
           </button>
         </td>
@@ -576,7 +667,7 @@ function renderTrustedTable() {
     const ports = portList.join(', ') || '--';
 
     return `
-      <tr>
+      <tr class="clickable-row" onclick="openDeviceDetails('${dev.mac || ''}')" title="Click to view full device telemetry and history">
         <td><strong>${escapeHtml(friendly)}</strong>${owner}${statusBadge}${hostSubtitle}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
@@ -586,6 +677,124 @@ function renderTrustedTable() {
       </tr>
     `;
   }).join('');
+}
+
+function openDeviceDetails(mac) {
+  if (!mac) return;
+  const macUpper = mac.toUpperCase();
+  const dev = cachedTrusted.find(d => (d.mac || '').toUpperCase() === macUpper) ||
+              cachedAlien.find(d => (d.mac || '').toUpperCase() === macUpper);
+  if (!dev) return;
+
+  const friendly = dev.friendly_name || dev.name || dev.display_name || (dev.hostname !== 'Unknown' ? dev.hostname : 'Device');
+  document.getElementById('detailDeviceTitle').textContent = friendly;
+  document.getElementById('detailDeviceSubtitle').textContent = `${dev.mac || 'N/A'} • ${dev.ip || dev.primary_ip || 'No IP'}`;
+
+  // Status and trust badges
+  const isOnline = dev.status === 'Online / Active' || dev.status === 'Local Machine';
+  const statusBadge = isOnline
+    ? '<span class="badge badge-active">● Online / Active</span>'
+    : '<span class="badge badge-inactive">○ Offline / Asleep</span>';
+  const trustBadge = dev.trusted
+    ? '<span class="badge badge-active">🛡️ Trusted Whitelist</span>'
+    : '<span class="badge badge-red">👽 Unrecognized Alien</span>';
+  const vendorBadge = dev.vendor && dev.vendor !== 'N/A' && dev.vendor !== 'Unknown'
+    ? `<span class="badge badge-inactive">🏷️ ${escapeHtml(dev.vendor)}</span>`
+    : '';
+  document.getElementById('detailBadges').innerHTML = `${statusBadge} ${trustBadge} ${vendorBadge}`;
+
+  // Grid details
+  const ip = dev.ip || dev.primary_ip || '--';
+  const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
+  const aliasStr = aliasList.length > 0 ? ` <span style="color: var(--text-dim); font-size: 0.75rem;">(Aliases: ${escapeHtml(aliasList.join(', '))})</span>` : '';
+  document.getElementById('detailIp').innerHTML = `${escapeHtml(ip)}${aliasStr}`;
+  document.getElementById('detailMac').textContent = dev.mac || '--';
+  document.getElementById('detailVendor').textContent = dev.vendor || 'Unknown Hardware Vendor';
+  document.getElementById('detailHostname').textContent = dev.hostname || 'Unknown';
+  document.getElementById('detailOwnerType').textContent = `${dev.device_type || 'Generic Host'} (${dev.owner || 'User'})`;
+  document.getElementById('detailDiscoveryStatus').textContent = `${dev.discovery_method || 'Layer-2 ARP Scan'}`;
+
+  // Open Ports
+  const portList = Array.isArray(dev.ports) ? dev.ports : (Array.isArray(dev.open_ports) ? dev.open_ports : []);
+  if (portList.length > 0) {
+    document.getElementById('detailPorts').innerHTML = portList.map(p => `<span class="badge badge-type" style="color: var(--accent-cyan);">${escapeHtml(p)}</span>`).join(' ');
+  } else {
+    document.getElementById('detailPorts').textContent = 'None detected';
+  }
+
+  // Discovered mDNS / Bonjour / WS services
+  const mdnsList = Array.isArray(dev.mdns_services) ? dev.mdns_services : [];
+  const wsList = Array.isArray(dev.ws_types) ? dev.ws_types : [];
+  const allServices = mdnsList.concat(wsList);
+  if (allServices.length > 0) {
+    document.getElementById('detailMdns').innerHTML = allServices.map(s => `<div class="mono" style="font-size: 0.78rem; padding: 2px 0;">• ${escapeHtml(s)}</div>`).join('');
+  } else {
+    document.getElementById('detailMdns').textContent = 'None observed on local subnet';
+  }
+
+  // Threats / Notes
+  const threats = Array.isArray(dev.threats) ? dev.threats : [];
+  const notes = Array.isArray(dev.notes) ? dev.notes : [];
+  const combinedNotes = threats.concat(notes);
+  const threatsSec = document.getElementById('detailThreatsSection');
+  if (combinedNotes.length > 0) {
+    threatsSec.style.display = 'block';
+    document.getElementById('detailThreats').innerHTML = combinedNotes.map(t => `<div style="padding: 2px 0;">⚠️ ${escapeHtml(t)}</div>`).join('');
+  } else {
+    threatsSec.style.display = 'none';
+  }
+
+  // Device Security Events
+  const devEvents = cachedEvents.filter(e => {
+    return (e.mac && e.mac.toUpperCase() === macUpper) || (dev.ip && e.ip === dev.ip);
+  });
+  document.getElementById('detailEventsBadge').textContent = `${devEvents.length} event${devEvents.length === 1 ? '' : 's'}`;
+  const eventsTbody = document.getElementById('detailEventsTableBody');
+  if (devEvents.length === 0) {
+    eventsTbody.innerHTML = '<tr><td colspan="4" class="empty-msg" style="padding: 12px;">No security events recorded for this device.</td></tr>';
+  } else {
+    eventsTbody.innerHTML = devEvents.map(e => {
+      const sev = (e.severity || 'INFO').toUpperCase();
+      let sevBadge = '<span class="badge badge-sev-info">INFO</span>';
+      if (sev === 'CRITICAL') sevBadge = '<span class="badge badge-sev-critical">CRIT</span>';
+      else if (sev === 'WARN' || sev === 'WARNING') sevBadge = '<span class="badge badge-sev-warn">WARN</span>';
+      return `
+        <tr>
+          <td style="font-size: 0.78rem;">${formatEventTime(e.timestamp)}</td>
+          <td>${sevBadge}</td>
+          <td><span class="badge badge-type" style="font-size: 0.68rem;">${escapeHtml(e.event_type || '')}</span></td>
+          <td style="font-size: 0.8rem;">
+            <strong>${escapeHtml(e.title || '')}</strong>
+            <div style="font-size: 0.74rem; color: var(--text-dim);">${escapeHtml(e.description || '')}</div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  // Action buttons
+  const actionsDiv = document.getElementById('detailModalActions');
+  if (!dev.trusted) {
+    const safeName = escapeHtml(friendly).replace(/'/g, "\\'");
+    actionsDiv.innerHTML = `
+      <button type="button" onclick="closeDeviceDetailsModal()">Close</button>
+      <button type="button" class="btn-success" onclick="closeDeviceDetailsModal(); openWhitelistModal('${dev.mac}', '${dev.ip || ''}', '${safeName}')">➕ Trust / Whitelist Device</button>
+    `;
+  } else {
+    actionsDiv.innerHTML = `<button type="button" onclick="closeDeviceDetailsModal()">Close</button>`;
+  }
+
+  document.getElementById('deviceDetailsModal').style.display = 'flex';
+}
+
+function closeDeviceDetailsModal() {
+  document.getElementById('deviceDetailsModal').style.display = 'none';
+}
+
+function handleDetailsBackdropClick(e) {
+  if (e.target.id === 'deviceDetailsModal') {
+    closeDeviceDetailsModal();
+  }
 }
 
 function openWhitelistModal(mac, ip, suggestion) {

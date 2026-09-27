@@ -132,13 +132,27 @@ class EventManager:
         except Exception:
             pass
 
-    def get_events(self, limit: int = 100, event_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Returns events in reverse chronological order (newest first)."""
+    def get_events(
+        self,
+        limit: int = 100,
+        event_type: Optional[str] = None,
+        mac: Optional[str] = None,
+        ip: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Returns events in reverse chronological order (newest first) with optional filtering."""
         with self._lock:
             ev_list = list(self._events)
 
         if event_type:
             ev_list = [e for e in ev_list if e.get("event_type") == event_type]
+
+        if mac:
+            mac_clean = mac.strip().upper()
+            ev_list = [e for e in ev_list if (e.get("mac") or "").upper() == mac_clean]
+
+        if ip:
+            ip_clean = ip.strip()
+            ev_list = [e for e in ev_list if e.get("ip") == ip_clean]
 
         ev_list.reverse()
         return ev_list[:limit]

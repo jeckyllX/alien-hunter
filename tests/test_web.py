@@ -195,16 +195,20 @@ class TestSentinelState(unittest.TestCase):
         # router is missing from scan, so it transitions to Offline / Asleep
         self.state.update_audit(
             devices=[dev_laptop_online, dev_alien],
-            threats=["Stealth TCP SYN scan detected from 192.168.1.99"],
+            threats=[
+                "Stealth TCP SYN scan detected from 192.168.1.99",
+                "CRITICAL: Active ICMP Route Hijacking detected! Host at 192.168.1.55 sent ICMP Redirect",
+            ],
         )
 
         events_payload = self.state.get_events_payload()
-        self.assertGreaterEqual(events_payload["count"], 3)
+        self.assertGreaterEqual(events_payload["count"], 4)
         event_types = [e["event_type"] for e in events_payload["events"]]
         self.assertIn("DEVICE_ONLINE", event_types)
         self.assertIn("DEVICE_OFFLINE", event_types)
         self.assertIn("ALIEN_DETECTED", event_types)
         self.assertIn("SYN_SCAN_DETECTED", event_types)
+        self.assertIn("ICMP_REDIRECT_DETECTED", event_types)
 
         # Whitelisting the alien device generates DEVICE_WHITELISTED
         self.state.update_whitelist_entry("AA:BB:CC:DD:EE:FF", {"name": "Approved Intruder", "owner": "Admin"})
@@ -403,6 +407,13 @@ class TestLightweightWebServer(unittest.TestCase):
         with urlopen(req_limit, timeout=3) as res:
             data = json.loads(res.read().decode("utf-8"))
             self.assertLessEqual(len(data["events"]), 1)
+
+        # Test ip query param
+        req_ip = Request(f"{self.base_url}/api/events?ip=192.168.1.10")
+        with urlopen(req_ip, timeout=3) as res:
+            data = json.loads(res.read().decode("utf-8"))
+            self.assertEqual(len(data["events"]), 1)
+            self.assertEqual(data["events"][0]["ip"], "192.168.1.10")
 
         # Test HEAD request
         head_req = Request(f"{self.base_url}/api/events", method="HEAD")

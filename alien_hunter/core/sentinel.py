@@ -13,6 +13,7 @@ from ..defenses.syn_scan import SynScanDetector
 from ..defenses.dns_tunneling import DnsTunnelingDetector
 from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
+from ..defenses.icmp_redirect import IcmpRedirectGuard
 from ..web.state import SentinelState
 from ..web.server import LightweightWebServer
 from ..events import EventManager
@@ -38,6 +39,7 @@ class SentinelWatchdog:
         dns_tunneling_enabled: bool = True,
         dhcp_starvation_enabled: bool = True,
         arp_poison_enabled: bool = True,
+        icmp_redirect_enabled: bool = True,
         sync_db: bool = True,
         web_enabled: bool = False,
         web_host: str = "0.0.0.0",
@@ -63,6 +65,8 @@ class SentinelWatchdog:
         self.dhcp_guard: Optional[DhcpStarvationGuard] = None
         self.arp_poison_enabled = arp_poison_enabled
         self.arp_guard: Optional[ArpPoisonGuard] = None
+        self.icmp_redirect_enabled = icmp_redirect_enabled
+        self.icmp_guard: Optional[IcmpRedirectGuard] = None
         self.sync_db = sync_db
         self.web_enabled = web_enabled
         self.web_host = web_host
@@ -141,6 +145,15 @@ class SentinelWatchdog:
             if self.arp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning & Gateway Masquerade Guard active.{Colors.RESET}")
 
+        if self.icmp_redirect_enabled:
+            self.icmp_guard = IcmpRedirectGuard(
+                interface=self.interface,
+                gateway_ip=gateway_ip,
+                local_ip=local_ip,
+            )
+            if self.icmp_guard.start():
+                print(f"{Colors.GREEN}[+] Real-Time ICMP Redirect Route Hijacking Guard active.{Colors.RESET}")
+
         if self.web_enabled:
             self.web_server = LightweightWebServer(
                 state=self.web_state,
@@ -168,6 +181,7 @@ class SentinelWatchdog:
                 "dns_tunneling": bool(self.dns_tunnel_detector),
                 "dhcp_starvation": bool(self.dhcp_guard),
                 "arp_poison": bool(self.arp_guard),
+                "icmp_redirect": bool(self.icmp_guard),
             }
 
         try:
@@ -211,6 +225,11 @@ class SentinelWatchdog:
                                 gateway_mac=result.network.gateway_mac,
                                 trusted_ip_mac_map=trusted_map,
                             )
+                        if self.icmp_guard:
+                            self.icmp_guard.update_topology(
+                                gateway_ip=result.network.gateway_ip,
+                                local_ip=result.network.local_ip,
+                            )
 
                     # Check for honeypot intrusions
                     honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []
@@ -242,6 +261,12 @@ class SentinelWatchdog:
                         for at in arp_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {at}{Colors.RESET}")
 
+                    # Check for real-time ICMP redirect route hijacking
+                    icmp_threats = self.icmp_guard.get_threat_strings() if self.icmp_guard else []
+                    if icmp_threats:
+                        for it in icmp_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {it}{Colors.RESET}")
+
                     combined_threats = (
                         result.threats
                         + honey_threats
@@ -249,6 +274,7 @@ class SentinelWatchdog:
                         + dns_threats
                         + dhcp_threats
                         + arp_threats
+                        + icmp_threats
                     )
 
                     if self.web_state:
@@ -262,6 +288,7 @@ class SentinelWatchdog:
                                 "dns_tunneling": bool(self.dns_tunnel_detector),
                                 "dhcp_starvation": bool(self.dhcp_guard),
                                 "arp_poison": bool(self.arp_guard),
+                                "icmp_redirect": bool(self.icmp_guard),
                             },
                         )
 
@@ -269,7 +296,7 @@ class SentinelWatchdog:
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats:
+                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats or icmp_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
