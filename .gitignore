@@ -3,6 +3,8 @@ known_devices.json
 config.json
 events.jsonl
 *.jsonl
+signatures.json
+.signatures_sync.json
 TODO.md
 AGENTS.md
 CODE_REVIEW.md
