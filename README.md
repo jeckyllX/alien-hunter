@@ -36,6 +36,8 @@ Alien Hunter includes a built-in single-page web dashboard and REST API served d
 * **WS-Discovery:** Probes UDP 3702 (`239.255.255.250`) to locate Windows endpoints and ONVIF-compatible devices.
 * **NetBIOS & SSDP:** Queries NetBIOS Name Service (`UDP 137`) and UPnP M-SEARCH (`UDP 1900`).
 * **Device Identification:** Correlates OUI vendor tables, mDNS records, and DHCP hostnames to classify hardware types.
+* **DHCP Option 55 & mDNS Device Fingerprinting:** Passively intercepts DHCP Discover and Request frames on UDP 67/68 to extract Parameter Request Lists (Option 55) and Vendor Class Identifiers (Option 60). Unmasks true OS families (iOS, Android, Windows, macOS, Linux, IoT) even when devices connect with privacy-randomized MAC addresses.
+* **Dynamic Signature Synchronization:** Maintains an offline-first, versioned database (`signatures.json`) with an anonymous, privacy-safe update mechanism (`--update-signatures`) using HTTP conditional caching (`ETag` / `If-None-Match`). Transmits zero local telemetry, IP addresses, or MAC addresses.
 * **Passive Traffic Sniffing:** Captures Ethernet frames on the local interface to identify unprompted traffic and hosts with out-of-subnet IP addresses.
 
 ### Intrusion Detection & Defenses
@@ -44,7 +46,7 @@ Alien Hunter includes a built-in single-page web dashboard and REST API served d
 * **DNS Integrity Verification:** Compares gateway DNS resolution against upstream resolvers (Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`) to identify spoofed private IPs or NXDOMAIN hijacking.
 * **Decoy Honey-Ports & Auth Traps:** Binds non-blocking TCP listeners and service banner emulators (HTTP, FTP, Telnet) to configurable decoy ports (e.g., 2323, 5555, 8888) to detect internal port scans and capture brute-force credentials.
 * **Stealth TCP SYN Scan Detection:** Captures raw IPv4 TCP frames to detect half-open SYN port sweeps across closed or unallocated ports (e.g., `nmap -sS`, `masscan`).
-* **High-Entropy DNS Tunneling Detection:** Analyzes DNS queries on the local interface for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`).
+* **High-Entropy DNS Tunneling Detection:** Analyzes DNS traffic for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`). **Operational scope:** This module inspects DNS traffic arriving at or passing through the local interface; it is directly effective when the host running Alien Hunter serves as the local network's DNS resolver or forwarder (such as a Pi-hole, AdGuard Home, or dnsmasq) or when listening on a mirrored/gateway interface. If endpoint devices query an external upstream DNS resolver directly over a switched network, their unicast traffic will not cross the local interface.
 * **DHCP Starvation & Pool Exhaustion Guard:** Passively inspects Layer-2 DHCP traffic to detect rapid bursts of Discover and Request frames with spoofed or mutating hardware MAC addresses attempting pool depletion (e.g., `Yersinia`, `dhcpstarv`).
 * **Real-Time ARP Cache Poisoning & Gateway Guard:** Passively sniffs Layer-2 ARP frames (`EtherType 0x0806`) in real time to detect active gateway impersonation, Ethernet/ARP MAC address forgeries, trusted device IP hijacking, and gratuitous ARP reply floods (e.g., `arpspoof`, `bettercap`, `ettercap`).
 * **Port Drift Tracking:** Compares open TCP ports against baseline records in `known_devices.json` to flag newly exposed services.
@@ -116,9 +118,13 @@ alien_hunter/
 │   ├── sniffer.py        # Raw socket Ethernet frame sniffer
 │   ├── ports.py          # TCP port scanner and service signatures
 │   └── net_utils.py      # Low-level socket creation helpers
+├── data/
+│   └── signatures.json   # Bundled canonical DHCP and mDNS signature database
 ├── identifiers/          # Vendor and device resolution
-│   ├── apple.py          # Apple device identification
-│   └── vendor.py         # IEEE OUI MAC database lookup
+│   ├── apple.py          # Apple device identification and mDNS PTR resolver
+│   ├── vendor.py         # IEEE OUI MAC database lookup and randomization check
+│   ├── signatures.py     # SignatureManager, DhcpFingerprintStore, and matcher
+│   └── sync.py           # Privacy-safe dynamic signature synchronization engine
 ├── ai/                   # AI security analysis adapter
 │   ├── engine.py         # AiAnalysisEngine
 │   ├── base.py           # BaseAIProvider and prompt formatting
@@ -162,6 +168,12 @@ sudo ./alien_hunter.py --web
 
 # Custom port for Web Dashboard
 sudo ./alien_hunter.py --web --web-port 8080
+
+# Synchronize device fingerprint signatures from upstream feed
+./alien_hunter.py --update-signatures
+
+# Force signature synchronization bypassing 24-hour rate limit
+./alien_hunter.py --update-signatures --force-sync
 ```
 
 ---
@@ -187,6 +199,8 @@ sudo ./alien_hunter.py --web --web-port 8080
 | `--ai` | Enables AI risk profiling. |
 | `--no-ai` | Disables AI risk profiling. |
 | `--test-ai` | Runs a test query against the configured AI provider. |
+| `--update-signatures` | Downloads and synchronizes the latest device fingerprint signatures from upstream. |
+| `--force-sync` | Forces signature synchronization, bypassing the 24-hour rate limit threshold. |
 | `--json` | Outputs results in machine-readable JSON format. |
 
 ---
