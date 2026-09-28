@@ -105,7 +105,12 @@ class SignatureSyncEngine:
         if meta.get("last_modified"):
             headers["If-Modified-Since"] = meta["last_modified"]
 
-        req = urllib.request.Request(self.feed_url, headers=headers)
+        url = self.feed_url
+        if force:
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}_t={int(now)}"
+
+        req = urllib.request.Request(url, headers=headers)
 
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
