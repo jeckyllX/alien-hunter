@@ -125,6 +125,13 @@ class BaseAIProvider(ABC):
         Infers an authoritative hardware classification hint using declarative
         vendor OUIs, hostname conventions, mDNS services, and port fingerprints.
         """
+        # 1. Authoritative DHCP Option 55/60 fingerprint from passive listener
+        if device.dhcp_params:
+            from ..identifiers.signatures import SignatureManager
+            match = SignatureManager().match_dhcp(device.dhcp_params)
+            if match:
+                return match.category
+
         text = f"{device.display_name} {device.hostname} {device.vendor} {' '.join(device.notes)} {' '.join(device.mdns_services)}".lower()
         open_ports: Set[int] = set()
         for p_str in (device.open_ports or []):
@@ -185,6 +192,7 @@ class BaseAIProvider(ABC):
         notes_text = "; ".join(device.notes) if device.notes else "None"
         hint = self.infer_device_hint(device)
         hint_line = f"- Deterministic Hint: {hint}\n" if hint else ""
+        dhcp_line = f"- DHCP OS Fingerprint: {device.dhcp_fingerprint}\n" if device.dhcp_fingerprint else ""
         mac_type = "Locally Administered / Randomized (OS Privacy Feature)" if device.is_randomized else "Physical Registered OUI"
 
         return (
@@ -194,6 +202,7 @@ class BaseAIProvider(ABC):
             f"- MAC Address: {device.mac} (Addressing Mode: {mac_type})\n"
             f"- Hostname / Identifier: {device.display_name}\n"
             f"- Hardware Vendor: {device.vendor}\n"
+            f"{dhcp_line}"
             f"{hint_line}"
             f"- Network Exposure: {ports_text}\n"
             f"- Active Threat Flags: {threats_text}\n"

@@ -54,6 +54,8 @@ class Device:
     aliases: List[str] = field(default_factory=list)
     discovery_method: str = "Layer-2 ARP Scan"
     ai_assessment: Optional[Any] = None
+    dhcp_fingerprint: Optional[str] = None
+    dhcp_params: Optional[List[int]] = None
 
     @property
     def display_name(self) -> str:
@@ -62,6 +64,8 @@ class Device:
             return self.friendly_name
         if self.hostname and self.hostname != "Unknown":
             return f"{self.hostname} ({self.vendor})"
+        if self.dhcp_fingerprint and self.is_randomized:
+            return f"{self.dhcp_fingerprint} ({self.vendor})"
         return self.vendor or "Unknown Device"
 
     def to_dict(self) -> Dict[str, Any]:

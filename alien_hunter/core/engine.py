@@ -20,6 +20,7 @@ from ..scanners.mdns import MdnsScanner
 from ..scanners.ws_discovery import WsDiscoveryScanner
 from ..identifiers.vendor import MacVendorResolver
 from ..identifiers.apple import AppleDeviceIdentifier
+from ..identifiers.signatures import SignatureManager, DhcpFingerprintStore
 from ..threats import ThreatDetector
 
 
@@ -40,6 +41,7 @@ class DiscoveryEngine:
 
         self.vendor_resolver = MacVendorResolver(**resolver_kwargs)
         self.apple_identifier = AppleDeviceIdentifier()
+        self.signature_manager = SignatureManager()
         self.port_scanner = PortScanner()
 
     @staticmethod
@@ -200,6 +202,25 @@ class DiscoveryEngine:
         else:
             mac = "N/A (Asleep)"
 
+        # DHCP Option 55/60 Passive Fingerprint Unmasking
+        dhcp_fp_info = DhcpFingerprintStore.get_instance().get(mac)
+        dhcp_fingerprint = None
+        dhcp_params = None
+        if dhcp_fp_info:
+            dhcp_params = dhcp_fp_info.get("param_list")
+            dhcp_match = self.signature_manager.match_dhcp(
+                dhcp_params, dhcp_fp_info.get("vendor_class")
+            )
+            if dhcp_match:
+                dhcp_fingerprint = dhcp_match.vendor
+                notes.append(f"DHCP OS: {dhcp_match.vendor} ({dhcp_match.source})")
+                if "apple" in dhcp_match.vendor.lower():
+                    is_apple = True
+                if is_rand and vendor == "Randomized Private MAC":
+                    vendor = f"{dhcp_match.vendor} (Randomized MAC)"
+            if dhcp_fp_info.get("hostname") and clean_host == "Unknown":
+                clean_host = dhcp_fp_info["hostname"]
+
         # Specialized Apple device identification
         is_apple, apple_type, resolved_name = self.apple_identifier.identify(
             ip, mac, raw_hostname, vendor
@@ -234,6 +255,14 @@ class DiscoveryEngine:
                     vendor = mdl
             elif mdns_data and mdns_data.get("model"):
                 vendor = mdns_data["model"]
+
+        # Match advertised mDNS service types against signature registry
+        if mdns_data and mdns_data.get("services"):
+            mdns_match = self.signature_manager.match_mdns(mdns_data["services"])
+            if mdns_match:
+                notes.append(f"mDNS Service Match: {mdns_match.vendor}")
+                if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC"):
+                    vendor = mdns_match.vendor
 
         # Fallback alias matching for sleeping devices without ARP response
         if not is_trusted and mac == "N/A (Asleep)":
@@ -353,6 +382,8 @@ class DiscoveryEngine:
             ws_types=ws_data.get("types", []) if ws_data else [],
             aliases=aliases,
             discovery_method=discovery_str,
+            dhcp_fingerprint=dhcp_fingerprint,
+            dhcp_params=dhcp_params,
         )
 
         return dev_obj, host_threats

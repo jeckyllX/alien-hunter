@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..identifiers.signatures import DhcpFingerprintStore
+
 
 class DhcpStarvationEvent:
     """Represents a detected DHCP starvation or pool exhaustion attack."""
@@ -153,9 +155,13 @@ class DhcpStarvationGuard:
         if bootp[236:240] != DhcpStarvationGuard.MAGIC_COOKIE:
             return None
 
-        # Parse DHCP options to determine message type
+        # Parse DHCP options to determine message type and fingerprint parameters
         options = bootp[240:]
         msg_type = 0
+        param_list: List[int] = []
+        vendor_class: Optional[str] = None
+        hostname: Optional[str] = None
+
         idx = 0
         while idx < len(options):
             opt = options[idx]
@@ -172,6 +178,18 @@ class DhcpStarvationGuard:
             opt_val = options[idx + 2 : idx + 2 + opt_len]
             if opt == 53 and opt_len >= 1:
                 msg_type = opt_val[0]
+            elif opt == 55:  # Parameter Request List
+                param_list = [int(b) for b in opt_val]
+            elif opt == 60:  # Vendor Class Identifier
+                try:
+                    vendor_class = opt_val.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    pass
+            elif opt == 12:  # Host Name
+                try:
+                    hostname = opt_val.decode("utf-8", errors="ignore").strip()
+                except Exception:
+                    pass
             idx += 2 + opt_len
 
         # Focus on DHCPDISCOVER (1) and DHCPREQUEST (3)
@@ -188,6 +206,9 @@ class DhcpStarvationGuard:
             "chaddr": chaddr_mac,
             "msg_type": msg_type,
             "is_spoofed": (src_mac.upper() != chaddr_mac.upper()),
+            "param_list": param_list,
+            "vendor_class": vendor_class,
+            "hostname": hostname,
         }
 
     def process_packet(self, pkt: bytes, now: Optional[float] = None) -> Optional[DhcpStarvationEvent]:
@@ -201,6 +222,17 @@ class DhcpStarvationGuard:
 
         if now is None:
             now = time.time()
+
+        # Record DHCP fingerprint in centralized store for device identification
+        if parsed.get("param_list"):
+            target_mac = parsed.get("chaddr") or parsed.get("src_mac")
+            DhcpFingerprintStore.get_instance().record(
+                mac=target_mac,
+                param_list=parsed["param_list"],
+                vendor_class=parsed.get("vendor_class"),
+                hostname=parsed.get("hostname"),
+                now=now,
+            )
 
         with self._lock:
             self._history.append(

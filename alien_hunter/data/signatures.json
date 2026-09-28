@@ -1,0 +1,223 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-09-28T23:30:00Z",
+  "description": "Alien Hunter canonical device fingerprint database (DHCP Option 55/60 & mDNS DNS-SD).",
+  "dhcp_signatures": [
+    {
+      "vendor": "Apple iOS (iPhone / iPad)",
+      "category": "Smartphone",
+      "os_family": "iOS",
+      "param_list": [1, 121, 3, 6, 15, 114, 119, 252],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple iOS (iPhone / iPad)",
+      "category": "Smartphone",
+      "os_family": "iOS",
+      "param_list": [1, 121, 3, 6, 15, 119, 252],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple iOS (iPhone / iPad)",
+      "category": "Smartphone",
+      "os_family": "iOS",
+      "param_list": [1, 3, 6, 15, 119, 252],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple macOS",
+      "category": "Laptop / Workstation",
+      "os_family": "macOS",
+      "param_list": [1, 121, 3, 6, 15, 119, 252, 95, 44, 46],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple macOS",
+      "category": "Laptop / Workstation",
+      "os_family": "macOS",
+      "param_list": [1, 3, 6, 15, 119, 95, 252, 44, 46],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Google Android Device",
+      "category": "Smartphone",
+      "os_family": "Android",
+      "param_list": [1, 3, 6, 15, 26, 28, 51, 58, 59, 43],
+      "vendor_class_pattern": "^android-dhcp-",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Google Android Device",
+      "category": "Smartphone",
+      "os_family": "Android",
+      "param_list": [1, 3, 6, 15, 26, 28, 51, 58, 59],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Microsoft Windows 10/11",
+      "category": "Laptop / Workstation",
+      "os_family": "Windows",
+      "param_list": [1, 3, 6, 15, 31, 33, 43, 44, 46, 47, 119, 121, 249, 252],
+      "vendor_class_pattern": "^MSFT 5\\.0",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Microsoft Windows PC",
+      "category": "Laptop / Workstation",
+      "os_family": "Windows",
+      "param_list": [1, 15, 3, 6, 44, 46, 47, 31, 33, 121, 249, 43],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Linux Host (dhcpcd)",
+      "category": "Laptop / Workstation",
+      "os_family": "Linux",
+      "param_list": [1, 28, 2, 3, 15, 6, 119, 12, 44, 47, 26, 121, 42],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Linux Host (systemd-networkd)",
+      "category": "Laptop / Workstation",
+      "os_family": "Linux",
+      "param_list": [1, 3, 6, 15, 119, 12, 28, 26, 121, 42],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Linux Host (NetworkManager)",
+      "category": "Laptop / Workstation",
+      "os_family": "Linux",
+      "param_list": [1, 3, 6, 12, 15, 28, 42, 121],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Embedded IoT Linux (udhcp)",
+      "category": "Smart Home / IoT",
+      "os_family": "BusyBox / Embedded",
+      "param_list": [1, 3, 6, 12, 15, 28, 42],
+      "confidence": "MEDIUM"
+    },
+    {
+      "vendor": "Espressif IoT Device (ESP8266 / ESP32)",
+      "category": "Smart Home / IoT",
+      "os_family": "FreeRTOS",
+      "param_list": [1, 3, 6, 15, 28, 42],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Roku Streaming Device",
+      "category": "Smart TV / Streaming",
+      "os_family": "Roku OS",
+      "param_list": [1, 3, 6, 15, 28, 33],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Amazon Fire TV / Echo",
+      "category": "Smart TV / Streaming",
+      "os_family": "FireOS",
+      "param_list": [1, 3, 6, 15, 28, 51, 58, 59],
+      "vendor_class_pattern": "^Amazon",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Nintendo Switch",
+      "category": "Smart Home / IoT",
+      "os_family": "Nintendo Horizon",
+      "param_list": [1, 3, 6, 15, 28, 51, 58, 59, 119],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Sony PlayStation",
+      "category": "Smart Home / IoT",
+      "os_family": "PlayStation OS",
+      "param_list": [1, 3, 6, 15, 28, 51, 58, 59, 12, 119],
+      "confidence": "HIGH"
+    }
+  ],
+  "mdns_signatures": {
+    "_googlecast._tcp": {
+      "vendor": "Google Chromecast / Nest",
+      "category": "Smart TV / Streaming",
+      "os_family": "Cast OS"
+    },
+    "_airplay._tcp": {
+      "vendor": "Apple AirPlay Receiver",
+      "category": "Smart TV / Streaming",
+      "os_family": "Apple TV / AirPlay"
+    },
+    "_companion-link._tcp": {
+      "vendor": "Apple Device (Proximity Link)",
+      "category": "Smartphone",
+      "os_family": "Apple Ecosystem"
+    },
+    "_apple-mobdev2._tcp": {
+      "vendor": "Apple Mobile Device",
+      "category": "Smartphone",
+      "os_family": "iOS"
+    },
+    "_ipp._tcp": {
+      "vendor": "IPP Network Printer",
+      "category": "Network Printer",
+      "os_family": "Printer Firmware"
+    },
+    "_ipps._tcp": {
+      "vendor": "Secure IPP Network Printer",
+      "category": "Network Printer",
+      "os_family": "Printer Firmware"
+    },
+    "_printer._tcp": {
+      "vendor": "Network Printer (LPR)",
+      "category": "Network Printer",
+      "os_family": "Printer Firmware"
+    },
+    "_pdl-datastream._tcp": {
+      "vendor": "Network Printer (Raw JetDirect)",
+      "category": "Network Printer",
+      "os_family": "Printer Firmware"
+    },
+    "_sonos._tcp": {
+      "vendor": "Sonos Smart Speaker",
+      "category": "Smart Speaker / Audio",
+      "os_family": "Sonos OS"
+    },
+    "_spotify-connect._tcp": {
+      "vendor": "Spotify Connect Audio Device",
+      "category": "Smart Speaker / Audio",
+      "os_family": "Audio Firmware"
+    },
+    "_matter._tcp": {
+      "vendor": "Matter Smart Home Device",
+      "category": "Smart Home / IoT",
+      "os_family": "Matter / Thread"
+    },
+    "_hap._tcp": {
+      "vendor": "Apple HomeKit Accessory",
+      "category": "Smart Home / IoT",
+      "os_family": "HomeKit Accessory"
+    },
+    "_homekit._tcp": {
+      "vendor": "Apple HomeKit Hub",
+      "category": "Smart Home / IoT",
+      "os_family": "HomeKit Hub"
+    },
+    "_hue._tcp": {
+      "vendor": "Philips Hue Bridge",
+      "category": "Smart Home / IoT",
+      "os_family": "Hue OS"
+    },
+    "_workstation._tcp": {
+      "vendor": "Unix / Linux Workstation",
+      "category": "Laptop / Workstation",
+      "os_family": "Linux / BSD"
+    },
+    "_smb._tcp": {
+      "vendor": "SMB File Server / NAS",
+      "category": "NAS / Storage",
+      "os_family": "SMB Server"
+    },
+    "_afpovertcp._tcp": {
+      "vendor": "Apple Filing Protocol Server (NAS)",
+      "category": "NAS / Storage",
+      "os_family": "AFP Server"
+    }
+  }
+}
