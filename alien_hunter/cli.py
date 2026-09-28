@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ai", action="store_true", help="Enable AI device profiling and risk assessment")
     parser.add_argument("--no-ai", action="store_true", help="Disable AI device profiling")
     parser.add_argument("--test-ai", action="store_true", help="Test the configured AI provider with a simulated alien device")
+    parser.add_argument("--update-signatures", action="store_true", help="Download and synchronize the latest device signatures feed")
+    parser.add_argument("--force-sync", action="store_true", help="Force signature synchronization bypassing 24h interval check")
     return parser
 
 
@@ -62,8 +64,20 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.test_notify and not args.test_ai:
+    if not args.test_notify and not args.test_ai and not args.update_signatures:
         ensure_root()
+
+    if args.update_signatures:
+        from .identifiers.sync import SignatureSyncEngine
+        print(f"{Colors.CYAN}[*] Synchronizing device fingerprint signatures...{Colors.RESET}")
+        sync_engine = SignatureSyncEngine()
+        success, msg = sync_engine.sync(force=args.force_sync)
+        if success:
+            print(f"{Colors.GREEN}[+] {msg}{Colors.RESET}")
+            sys.exit(0)
+        else:
+            print(f"{Colors.RED}[-] {msg}{Colors.RESET}")
+            sys.exit(1)
 
     selected_interface = args.interface.strip() if args.interface else None
 
