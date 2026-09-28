@@ -8,7 +8,8 @@ import json
 import re
 import urllib.request
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List, Union
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Union, Tuple, Set
 
 from .models import (
     DeviceRiskAssessment,
@@ -18,6 +19,89 @@ from .models import (
     WhitelistRecommendation,
 )
 from ..models import Device
+
+
+@dataclass(frozen=True)
+class DeviceSignature:
+    """Declarative signature mapping network fingerprints to hardware categories."""
+    category: str
+    tokens: Tuple[str, ...] = ()
+    ports: Tuple[int, ...] = ()
+    is_randomized: Optional[bool] = None
+    stealth_only: bool = False
+
+    def matches(self, device: Device, text: str, open_ports: Set[int]) -> bool:
+        if self.is_randomized is not None and device.is_randomized != self.is_randomized:
+            return False
+        if self.stealth_only and open_ports:
+            return False
+        if self.ports and not any(p in open_ports for p in self.ports):
+            return False
+        if self.tokens and not any(t in text for t in self.tokens):
+            return False
+        return True
+
+
+DEVICE_SIGNATURES: Tuple[DeviceSignature, ...] = (
+    # Surveillance / Cameras
+    DeviceSignature(
+        category="Smart IP Camera",
+        tokens=("camera", "webcam", "ipcam", "hikvision", "dahua", "reolink", "ring", "nest", "wyze", "amcrest", "onvif", "ezviz", "arlo", "axis communications"),
+    ),
+    DeviceSignature(
+        category="Smart IP Camera",
+        ports=(554,),
+    ),
+    # Workstations / PCs
+    DeviceSignature(
+        category="Laptop / Workstation",
+        tokens=("laptop", "desktop", "thinkpad", "workstation", "surface", "macbook", "imac", "windows", "win10", "win11", "pc-", "liteon"),
+    ),
+    DeviceSignature(
+        category="Laptop / Workstation",
+        ports=(135, 139, 445, 3389),
+    ),
+    # Smartphones / Tablets
+    DeviceSignature(
+        category="Smartphone",
+        tokens=("phone", "pixel", "iphone", "galaxy", "nothing", "cobalt", "xiaomi", "oneplus", "huawei", "redmi", "oppo", "vivo", "realme", "motorola", "xperia", "ipad", "android", "mobile"),
+    ),
+    # Streaming / Smart TVs
+    DeviceSignature(
+        category="Smart TV / Streaming",
+        tokens=("appletv", "roku", "chromecast", "firetv", "smarttv", "bravia", "lgtv", "samsung-tv", "tcl", "shield", "kodi"),
+    ),
+    # Network Printers
+    DeviceSignature(
+        category="Network Printer",
+        tokens=("printer", "epson", "canon", "brother", "hp-print", "laserjet", "deskjet", "xerox", "kyocera"),
+    ),
+    DeviceSignature(
+        category="Network Printer",
+        ports=(515, 631, 9100),
+    ),
+    # Network Infrastructure / Gateways
+    DeviceSignature(
+        category="Network Appliance / Router",
+        tokens=("router", "gateway", "access-point", "fritz", "vodafone", "sercomm", "unifi", "ubiquiti", "netgear", "tp-link", "switch", "cisco", "mikrotik"),
+    ),
+    # Smart Audio
+    DeviceSignature(
+        category="Smart Speaker / Audio",
+        tokens=("sonos", "echo", "alexa", "homepod", "google-home", "nest-mini", "bose"),
+    ),
+    # Network Attached Storage
+    DeviceSignature(
+        category="NAS / Storage",
+        tokens=("nas", "synology", "qnap", "truenas", "unraid"),
+    ),
+    # Mobile Devices using IEEE 802 Locally Administered / Private MAC Address
+    DeviceSignature(
+        category="Smartphone",
+        is_randomized=True,
+        stealth_only=True,
+    ),
+)
 
 
 class BaseAIProvider(ABC):
@@ -38,90 +122,83 @@ class BaseAIProvider(ABC):
     @staticmethod
     def infer_device_hint(device: Device) -> Optional[str]:
         """
-        Infers an authoritative hardware classification hint using deterministic
+        Infers an authoritative hardware classification hint using declarative
         vendor OUIs, hostname conventions, mDNS services, and port fingerprints.
-        Acts as ground-truth anchoring for smaller local LLMs.
         """
         text = f"{device.display_name} {device.hostname} {device.vendor} {' '.join(device.notes)} {' '.join(device.mdns_services)}".lower()
+        open_ports: Set[int] = set()
+        for p_str in (device.open_ports or []):
+            try:
+                open_ports.add(int(p_str.split()[0].split("/")[0]))
+            except (ValueError, IndexError):
+                pass
 
-        # 1. Smart IP Cameras / Surveillance (check first if explicitly indicated)
-        if any(k in text for k in ("camera", "webcam", "ipcam", "hikvision", "dahua", "reolink", "ring", "nest", "wyze", "amcrest", "onvif", "ezviz", "arlo", "axis communications")):
-            return "Smart IP Camera"
-
-        # 2. Laptops / Workstations / PCs
-        if any(k in text for k in ("laptop", "desktop", "thinkpad", "workstation", "surface", "macbook", "imac", "windows", "win10", "win11", "pc-", "liteon")):
-            return "Laptop / Workstation"
-
-        # 3. Smartphones / Mobile Devices
-        if any(k in text for k in ("phone", "pixel", "iphone", "galaxy", "nothing", "cobalt", "xiaomi", "oneplus", "huawei", "redmi", "oppo", "vivo", "realme", "motorola", "xperia", "ipad", "android", "mobile")):
-            return "Smartphone"
-
-        # 4. Smart TV / Streaming
-        if any(k in text for k in ("appletv", "roku", "chromecast", "firetv", "smarttv", "bravia", "lgtv", "samsung-tv", "tcl", "shield", "kodi")):
-            return "Smart TV / Streaming"
-
-        # 5. Network Printers
-        if any(k in text for k in ("printer", "epson", "canon", "brother", "hp-print", "laserjet", "deskjet", "xerox", "kyocera")):
-            return "Network Printer"
-
-        # 6. Network Infrastructure (Routers / APs / Gateways / Switches)
-        if any(k in text for k in ("router", "gateway", "access-point", "fritz", "vodafone", "sercomm", "unifi", "ubiquiti", "netgear", "tp-link", "switch", "cisco", "mikrotik")):
-            return "Network Appliance / Router"
-
-        # 7. Smart Speaker / Audio
-        if any(k in text for k in ("sonos", "echo", "alexa", "homepod", "google-home", "nest-mini", "bose")):
-            return "Smart Speaker / Audio"
-
-        # 8. NAS / Network Storage
-        if any(k in text for k in ("nas", "synology", "qnap", "truenas", "unraid")):
-            return "NAS / Storage"
+        for sig in DEVICE_SIGNATURES:
+            if sig.matches(device, text, open_ports):
+                return sig.category
 
         return None
 
     def build_system_prompt(self) -> str:
         return (
-            "You are an expert defensive network security auditor analyzing devices discovered on a private LAN. "
-            "Your role is to help the administrator classify hardware, evaluate exposure, and decide whether to whitelist or isolate it.\n"
-            "Hardware Taxonomy:\n"
-            "- 'Smartphone': Mobile phones and handheld tablets (e.g. Android, iPhone, Pixel, Nothing Phone, Galaxy).\n"
-            "- 'Laptop / Workstation': Portable laptops, PCs, desktops, development workstations.\n"
-            "- 'Smart TV / Streaming': Streaming dongles, set-top boxes, smart televisions.\n"
-            "- 'Smart IP Camera': Surveillance cameras, NVRs (ONLY when video or camera indicators are present).\n"
+            "You are an expert defensive network security auditor analyzing hosts discovered on a private local area network (LAN).\n"
+            "Your task is to analyze host telemetry, evaluate exposure risk, and output structured JSON.\n\n"
+            "### Hardware Taxonomy\n"
+            "- 'Smartphone': Mobile phones and handheld tablets (iOS, Android).\n"
+            "- 'Laptop / Workstation': Laptops, personal computers, developer workstations.\n"
+            "- 'Smart TV / Streaming': Smart TVs, streaming dongles, set-top boxes.\n"
+            "- 'Smart IP Camera': Surveillance cameras, NVRs, webcams.\n"
             "- 'Network Appliance / Router': Gateways, access points, managed switches, firewalls.\n"
             "- 'Network Printer': Printers, multi-function copiers.\n"
-            "- 'Smart Home / IoT': Smart plugs, light bulbs, thermostats, smart speakers.\n"
-            "- 'Unknown Device': Unidentifiable hardware.\n\n"
-            "Return strictly valid JSON matching this schema:\n"
+            "- 'Smart Home / IoT': Smart plugs, lights, environmental sensors, smart speakers.\n"
+            "- 'NAS / Storage': Network-attached storage devices and file servers.\n"
+            "- 'Unknown Device': Insufficient telemetry to categorize.\n\n"
+            "### Reference Audit Exemplars\n\n"
+            "Example 1: Guest Mobile Client\n"
+            "Telemetry: MAC=Locally Administered (Randomized), Exposure=None (Stealth / Closed Profile), Banners=None\n"
+            "Analysis: Ephemeral MAC with stealth port profile and no OS service exposure is characteristic of a modern mobile operating system (iOS/Android MAC privacy).\n"
+            "Result: {\"analysis\": \"Ephemeral MAC with closed port profile indicates mobile OS privacy.\", \"device_type\": \"Smartphone\", \"risk_level\": \"LOW\", \"whitelist_recommendation\": \"INVESTIGATE\", \"summary\": \"Mobile device operating with randomized MAC privacy and stealth network profile.\", \"action_advice\": \"Verify guest smartphone identity and assign an alias if authorized.\"}\n\n"
+            "Example 2: Enterprise Workstation\n"
+            "Telemetry: MAC=Physical Registered OUI, Exposure=445 (microsoft-ds), Hostname=DESKTOP-8K2N, Banners=NetBIOS\n"
+            "Analysis: Advertised PC desktop naming convention and active SMB file-sharing service indicate a workstation.\n"
+            "Result: {\"analysis\": \"Active SMB service and workstation hostname pattern indicate a PC.\", \"device_type\": \"Laptop / Workstation\", \"risk_level\": \"LOW\", \"whitelist_recommendation\": \"ALLOW\", \"summary\": \"Internal workstation with active directory / file sharing services.\", \"action_advice\": \"Ensure host is enrolled in device management.\"}\n\n"
+            "Example 3: IP Surveillance Camera\n"
+            "Telemetry: MAC=Physical Registered OUI, Exposure=554 (rtsp), Hostname=CAM-DRIVEWAY, Banners=ONVIF\n"
+            "Analysis: Active RTSP streaming port and ONVIF discovery banner identify a surveillance camera.\n"
+            "Result: {\"analysis\": \"RTSP streaming service and ONVIF banner identify an IP camera.\", \"device_type\": \"Smart IP Camera\", \"risk_level\": \"MEDIUM\", \"whitelist_recommendation\": \"ALLOW\", \"summary\": \"Network IP surveillance camera streaming RTSP video.\", \"action_advice\": \"Isolate camera on a dedicated surveillance VLAN.\"}\n\n"
+            "### Output Schema\n"
+            "Return strictly valid JSON with this exact structure:\n"
             "{\n"
-            '  "device_type": "string (selected from taxonomy above)",\n'
+            '  "analysis": "1-2 sentences reasoning over telemetry (addressing type, ports, banners)",\n'
+            '  "device_type": "<Type from Hardware Taxonomy>",\n'
             '  "risk_level": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",\n'
-            '  "summary": "string (1-2 sentences summarizing what this hardware is and why it has this risk profile)",\n'
-            '  "whitelist_recommendation": "ALLOW" | "BLOCK" | "INVESTIGATE",\n'
-            '  "action_advice": "string (1 sentence concrete advice for the network admin)"\n'
-            "}\n\n"
-            "CRITICAL: Do NOT classify devices as 'Smart IP Camera' unless camera/video/surveillance keywords are explicitly present. "
-            "Examine Hostname, Vendor, and the Hardware Category Hint carefully."
+            '  "summary": "1-2 sentence executive summary of device function and risk",\n'
+            '  "whitelist_recommendation": "ALLOW" | "INVESTIGATE" | "BLOCK",\n'
+            '  "action_advice": "1 concise, actionable recommendation for the administrator"\n'
+            "}"
         )
 
     def build_user_prompt(self, device: Device, threats: List[str] = None) -> str:
         threat_list = (threats or []) + device.threats
         threats_text = ", ".join(threat_list) if threat_list else "None detected"
-        ports_text = ", ".join(device.open_ports) if device.open_ports else "None open / unresponsive"
+        ports_text = ", ".join(device.open_ports) if device.open_ports else "None (Stealth / Closed Profile)"
         notes_text = "; ".join(device.notes) if device.notes else "None"
         hint = self.infer_device_hint(device)
-        hint_line = f"- Hardware Category Hint: {hint}\n" if hint else ""
+        hint_line = f"- Deterministic Hint: {hint}\n" if hint else ""
+        mac_type = "Locally Administered / Randomized (OS Privacy Feature)" if device.is_randomized else "Physical Registered OUI"
 
         return (
-            f"Analyze the following newly discovered LAN host:\n"
+            f"Analyze the following discovered LAN host:\n\n"
+            f"### Target Host Telemetry\n"
             f"- IP Address: {device.ip}\n"
-            f"- MAC Address: {device.mac} ({'Randomized/Private MAC' if device.is_randomized else 'Physical OUI'})\n"
-            f"- Hostname / mDNS: {device.display_name}\n"
+            f"- MAC Address: {device.mac} (Addressing Mode: {mac_type})\n"
+            f"- Hostname / Identifier: {device.display_name}\n"
             f"- Hardware Vendor: {device.vendor}\n"
             f"{hint_line}"
-            f"- Open Ports & Services: {ports_text}\n"
-            f"- Scanner Threat Flags: {threats_text}\n"
-            f"- Notes / HTTP Banners: {notes_text}\n\n"
-            f"Provide the assessment JSON."
+            f"- Network Exposure: {ports_text}\n"
+            f"- Active Threat Flags: {threats_text}\n"
+            f"- Protocol Banners & Notes: {notes_text}\n\n"
+            f"Provide the device assessment JSON matching the output schema."
         )
 
     def _clean_json_text(self, text: str) -> str:
@@ -160,6 +237,7 @@ class BaseAIProvider(ABC):
             device_type = str(data.get("device_type", "Unknown Device")).strip()
             summary = str(data.get("summary", "No summary provided.")).strip()
             action = str(data.get("action_advice", "Monitor device traffic.")).strip()
+            analysis = str(data.get("analysis", "")).strip()
 
             # If device type is unclassified or unknown, fall back to deterministic hint:
             if device and (not device_type or device_type.lower() in ("unknown", "unknown device")):
@@ -174,6 +252,7 @@ class BaseAIProvider(ABC):
                 whitelist_recommendation=rec,
                 action_advice=action,
                 provider=self.provider_label,
+                analysis=analysis,
             )
         except Exception:
             return None
@@ -194,11 +273,20 @@ class BaseAIProvider(ABC):
 
     def build_network_posture_system_prompt(self) -> str:
         return (
-            "You are a defensive network security auditor providing executive analysis of a private LAN audit.\n"
-            "Given the network facts and security posture, return valid JSON matching this schema:\n"
+            "You are an expert defensive network security auditor delivering an executive posture assessment for a private LAN audit.\n"
+            "Evaluate aggregate network audit findings objectively and provide concise executive analysis and hardening recommendations.\n\n"
+            "### Posture Tiers\n"
+            "- 'SECURE': All active devices are verified against authorization baseline with zero threats detected.\n"
+            "- 'WARNING': Unrecognized or unverified alien devices are present, requiring review.\n"
+            "- 'CRITICAL': Active security exploits, spoofing, or severe protocol anomalies detected.\n\n"
+            "### Output Schema\n"
+            "Return strictly valid JSON with this structure:\n"
             "{\n"
-            '  "summary": "1-2 sentence executive assessment of the network posture",\n'
-            '  "hardening_advice": ["actionable recommendation 1", "actionable recommendation 2"]\n'
+            '  "summary": "<1-2 sentence executive assessment of the network security posture>",\n'
+            '  "hardening_advice": [\n'
+            '    "<actionable recommendation 1>",\n'
+            '    "<actionable recommendation 2>"\n'
+            "  ]\n"
             "}"
         )
 
@@ -207,17 +295,19 @@ class BaseAIProvider(ABC):
         dev_sample = []
         for d in audit.devices[:12]:
             status = "Alien" if d.is_alien else ("Trusted" if d.trusted else "Unverified")
-            ports = f"Ports: {', '.join(d.open_ports)}" if d.open_ports else "No open ports"
+            ports = f"Ports: {', '.join(d.open_ports)}" if d.open_ports else "Stealth / Closed Profile"
             dev_sample.append(f"- {d.display_name} ({d.ip}, {status}, {ports})")
         dev_text = "\n".join(dev_sample) if dev_sample else "No devices cataloged"
 
         return (
-            f"Audit Summary for local subnet {audit.network.subnet_cidr}:\n"
+            f"### Network Audit Context\n"
+            f"- Subnet: {audit.network.subnet_cidr}\n"
             f"- Computed Posture: [{posture}]\n"
-            f"- Total Hosts: {audit.total_count}, Trusted: {audit.trusted_count}, Unrecognized Aliens: {audit.alien_count}\n"
-            f"- Security Threat Flags: {threats_str}\n\n"
-            f"Device Inventory Sample:\n{dev_text}\n\n"
-            f"Provide the executive assessment JSON with summary and hardening recommendations."
+            f"- Inventory: {audit.total_count} total hosts ({audit.trusted_count} trusted, {audit.alien_count} unrecognized aliens)\n"
+            f"- Active Threats: {threats_str}\n\n"
+            f"### Sample Device Inventory\n"
+            f"{dev_text}\n\n"
+            f"Provide the executive assessment JSON matching the output schema."
         )
 
     def _parse_posture_json(

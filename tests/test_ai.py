@@ -107,6 +107,76 @@ class TestAIEngine(unittest.TestCase):
         )
         self.assertEqual(self.provider.infer_device_hint(laptop), "Laptop / Workstation")
 
+        # Stealth Randomized MAC Mobile Device (e.g. iPhone Private Wi-Fi Address)
+        iphone = Device(
+            ip="192.168.1.114",
+            mac="2A:A9:34:C4:17:28",
+            vendor="Randomized Private MAC",
+            is_randomized=True,
+        )
+        self.assertEqual(self.provider.infer_device_hint(iphone), "Smartphone")
+
+        # Randomized MAC with PC Hostname
+        laptop_rand = Device(
+            ip="192.168.1.115",
+            mac="2A:A9:34:C4:17:29",
+            hostname="LAPTOP-CORP",
+            vendor="Randomized Private MAC",
+            is_randomized=True,
+        )
+        self.assertEqual(self.provider.infer_device_hint(laptop_rand), "Laptop / Workstation")
+
+        # Randomized MAC with Workstation SMB Port
+        pc_smb = Device(
+            ip="192.168.1.116",
+            mac="2A:A9:34:C4:17:30",
+            vendor="Randomized Private MAC",
+            is_randomized=True,
+            open_ports=["445/tcp microsoft-ds"],
+        )
+        self.assertEqual(self.provider.infer_device_hint(pc_smb), "Laptop / Workstation")
+
+        # IP Surveillance Camera with RTSP Port
+        cam = Device(
+            ip="192.168.1.150",
+            mac="B0:C5:54:12:34:56",
+            open_ports=["554/tcp rtsp"],
+        )
+        self.assertEqual(self.provider.infer_device_hint(cam), "Smart IP Camera")
+
+    def test_parse_response_with_analysis(self):
+        iphone = Device(
+            ip="192.168.1.114",
+            mac="2A:A9:34:C4:17:28",
+            is_randomized=True,
+        )
+        raw_json = (
+            '{"analysis": "Ephemeral MAC with stealth port profile matches mobile OS privacy.", '
+            '"device_type": "Smartphone", "risk_level": "LOW", '
+            '"summary": "Mobile device with randomized MAC.", '
+            '"whitelist_recommendation": "INVESTIGATE", "action_advice": "Check ownership."}'
+        )
+        assessment = self.provider._parse_response_json(raw_json, device=iphone)
+        self.assertIsNotNone(assessment)
+        self.assertEqual(assessment.device_type, "Smartphone")
+        self.assertEqual(assessment.analysis, "Ephemeral MAC with stealth port profile matches mobile OS privacy.")
+
+    def test_prompts_structure(self):
+        sys_prompt = self.provider.build_system_prompt()
+        self.assertIn("Reference Audit Exemplars", sys_prompt)
+        self.assertIn("Hardware Taxonomy", sys_prompt)
+        self.assertIn('"analysis":', sys_prompt)
+
+        dev = Device(
+            ip="192.168.1.114",
+            mac="2A:A9:34:C4:17:28",
+            is_randomized=True,
+        )
+        user_prompt = self.provider.build_user_prompt(dev)
+        self.assertIn("Addressing Mode: Locally Administered / Randomized", user_prompt)
+        self.assertIn("Stealth / Closed Profile", user_prompt)
+        self.assertIn("Deterministic Hint: Smartphone", user_prompt)
+
     def test_unknown_device_type_fallback(self):
         laptop = Device(
             ip="192.168.1.203",

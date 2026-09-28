@@ -48,6 +48,7 @@ class DeviceRiskAssessment:
     action_advice: str
     provider: str = "Unknown"
     confidence: str = "HIGH"
+    analysis: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -62,6 +63,7 @@ class DeviceRiskAssessment:
             "action_advice": self.action_advice,
             "provider": self.provider,
             "confidence": self.confidence,
+            "analysis": self.analysis,
         }
 
 
