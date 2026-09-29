@@ -495,10 +495,30 @@ async function fetchData() {
       pill.style.color = 'var(--accent-red)';
     }
 
+    function formatTimeAgo(secs) {
+      if (secs === null || secs === undefined || isNaN(secs)) return 'In progress...';
+      if (secs < 60) return `${secs}s ago`;
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      if (m < 60) {
+        return s > 0 ? `${m}m ${s}s ago` : `${m}m ago`;
+      }
+      const h = Math.floor(m / 60);
+      const remM = m % 60;
+      if (h < 24) {
+        return remM > 0 ? `${h}h ${remM}m ago` : `${h}h ago`;
+      }
+      const d = Math.floor(h / 24);
+      const remH = h % 24;
+      return remH > 0 ? `${d}d ${remH}h ago` : `${d}d ago`;
+    }
+
     // Status updates
     document.getElementById('valUptime').textContent = resStatus.uptime_human || '--';
-    if (resStatus.seconds_since_last_scan !== null && resStatus.seconds_since_last_scan !== undefined) {
-      document.getElementById('valLastScan').textContent = `Last scan: ${resStatus.seconds_since_last_scan}s ago`;
+    if (resStatus.since_last_scan_human) {
+      document.getElementById('valLastScan').textContent = `Last scan: ${resStatus.since_last_scan_human}`;
+    } else if (resStatus.seconds_since_last_scan !== null && resStatus.seconds_since_last_scan !== undefined) {
+      document.getElementById('valLastScan').textContent = `Last scan: ${formatTimeAgo(resStatus.seconds_since_last_scan)}`;
     } else {
       document.getElementById('valLastScan').textContent = 'Last scan: In progress...';
     }
@@ -519,7 +539,8 @@ async function fetchData() {
       { key: 'dns_tunneling', label: 'DNS Tunneling' },
       { key: 'dhcp_starvation', label: 'DHCP Starvation' },
       { key: 'arp_poison', label: 'ARP Poison Guard' },
-      { key: 'icmp_redirect', label: 'ICMP Redirect Guard' }
+      { key: 'icmp_redirect', label: 'ICMP Redirect Guard' },
+      { key: 'ssdp_harvester', label: 'SSDP Harvester' }
     ];
     let badgesHtml = '';
     badgeMap.forEach(b => {
