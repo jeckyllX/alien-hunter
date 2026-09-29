@@ -323,6 +323,7 @@ class SentinelState:
                 "uptime_human": self._format_uptime(uptime_seconds),
                 "last_scan_time": self.last_scan_time,
                 "seconds_since_last_scan": since_last_scan,
+                "since_last_scan_human": f"{self._format_uptime(since_last_scan)} ago" if since_last_scan is not None else "In progress...",
                 "interval_seconds": self.interval,
                 "network": dict(self.network_info),
                 "active_defenses": dict(self.active_defenses),
