@@ -56,6 +56,8 @@ class Device:
     ai_assessment: Optional[Any] = None
     dhcp_fingerprint: Optional[str] = None
     dhcp_params: Optional[List[int]] = None
+    ssdp_fingerprint: Optional[str] = None
+    tcp_syn_fingerprint: Optional[str] = None
 
     @property
     def display_name(self) -> str:
@@ -64,8 +66,12 @@ class Device:
             return self.friendly_name
         if self.hostname and self.hostname != "Unknown":
             return f"{self.hostname} ({self.vendor})"
+        if self.ssdp_fingerprint:
+            return f"{self.ssdp_fingerprint} ({self.vendor})"
         if self.dhcp_fingerprint and self.is_randomized:
             return f"{self.dhcp_fingerprint} ({self.vendor})"
+        if self.tcp_syn_fingerprint and self.is_randomized:
+            return f"{self.tcp_syn_fingerprint} ({self.vendor})"
         return self.vendor or "Unknown Device"
 
     def to_dict(self) -> Dict[str, Any]:

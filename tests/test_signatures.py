@@ -20,6 +20,8 @@ class TestSignatureManager(unittest.TestCase):
         """Verifies bundled signatures.json is discovered and parsed."""
         self.assertGreater(len(self.mgr.dhcp_signatures), 10)
         self.assertGreater(len(self.mgr.mdns_signatures), 10)
+        self.assertGreater(len(self.mgr.ssdp_signatures), 10)
+        self.assertGreater(len(self.mgr.tcp_syn_signatures), 5)
 
     def test_match_apple_ios(self):
         """Tests exact and prefix matching for Apple iOS DHCP Option 55."""

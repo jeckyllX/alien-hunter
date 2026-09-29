@@ -20,7 +20,12 @@ from ..scanners.mdns import MdnsScanner
 from ..scanners.ws_discovery import WsDiscoveryScanner
 from ..identifiers.vendor import MacVendorResolver
 from ..identifiers.apple import AppleDeviceIdentifier
-from ..identifiers.signatures import SignatureManager, DhcpFingerprintStore
+from ..identifiers.signatures import (
+    SignatureManager,
+    DhcpFingerprintStore,
+    SsdpFingerprintStore,
+    TcpSynFingerprintStore,
+)
 from ..threats import ThreatDetector
 
 
@@ -176,6 +181,9 @@ class DiscoveryEngine:
         is_rand = False
         is_trusted = False
         friendly_name = None
+        notes: List[str] = []
+        ssdp_fingerprint: Optional[str] = None
+        tcp_syn_fingerprint: Optional[str] = None
 
         # Enrich from NetBIOS, SSDP, mDNS, and WS-Discovery
         nb_data = netbios_devices.get(ip)
@@ -264,6 +272,47 @@ class DiscoveryEngine:
                 if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC"):
                     vendor = mdns_match.vendor
 
+        # SSDP / UPnP Signature Resolution
+        ssdp_store_info = SsdpFingerprintStore.get_instance().get(ip)
+        ssdp_match = None
+        if ssdp_store_info:
+            ssdp_match = ssdp_store_info.get("match")
+            if not ssdp_match:
+                ssdp_match = self.signature_manager.match_ssdp(
+                    server=ssdp_store_info.get("server")
+                )
+        if not ssdp_match and ssdp_data:
+            ssdp_match = self.signature_manager.match_ssdp(
+                server=ssdp_data.get("server")
+            )
+        if ssdp_match:
+            ssdp_fingerprint = ssdp_match.vendor
+            notes.append(f"SSDP Device: {ssdp_match.vendor} ({ssdp_match.source})")
+            if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC"):
+                vendor = ssdp_match.vendor
+            elif is_rand and vendor == "Randomized Private MAC":
+                vendor = f"{ssdp_match.vendor} (Randomized MAC)"
+
+        # Passive TCP SYN Stack Fingerprint Resolution
+        tcp_syn_info = TcpSynFingerprintStore.get_instance().get(ip)
+        if tcp_syn_info:
+            tcp_match = tcp_syn_info.get("match")
+            if not tcp_match:
+                tcp_match = self.signature_manager.match_tcp_syn(
+                    ttl=tcp_syn_info["ttl"],
+                    options=tcp_syn_info["options"],
+                    window_size=tcp_syn_info.get("window_size"),
+                )
+            if tcp_match:
+                tcp_syn_fingerprint = tcp_match.vendor
+                notes.append(
+                    f"TCP Stack OS: {tcp_match.vendor} (TTL={tcp_syn_info['ttl']}, Options={tcp_syn_info['options']})"
+                )
+                if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC") and not dhcp_fingerprint:
+                    vendor = f"{tcp_match.vendor} (TCP SYN)"
+                elif is_rand and vendor == "Randomized Private MAC" and not dhcp_fingerprint:
+                    vendor = f"{tcp_match.vendor} (Randomized MAC)"
+
         # Fallback alias matching for sleeping devices without ARP response
         if not is_trusted and mac == "N/A (Asleep)":
             for w_mac, w_info in whitelist.items():
@@ -300,7 +349,6 @@ class DiscoveryEngine:
         # Security Port Probing
         open_ports: List[str] = []
         host_threats: List[str] = []
-        notes: List[str] = []
 
         # Add scanner metadata notes
         if nb_data and nb_data.get("workgroup"):
@@ -384,6 +432,8 @@ class DiscoveryEngine:
             discovery_method=discovery_str,
             dhcp_fingerprint=dhcp_fingerprint,
             dhcp_params=dhcp_params,
+            ssdp_fingerprint=ssdp_fingerprint,
+            tcp_syn_fingerprint=tcp_syn_fingerprint,
         )
 
         return dev_obj, host_threats

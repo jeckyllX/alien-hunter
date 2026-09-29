@@ -14,6 +14,7 @@ from ..defenses.dns_tunneling import DnsTunnelingDetector
 from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
 from ..defenses.icmp_redirect import IcmpRedirectGuard
+from ..identifiers.ssdp import SsdpListener
 from ..web.state import SentinelState
 from ..web.server import LightweightWebServer
 from ..events import EventManager
@@ -67,6 +68,7 @@ class SentinelWatchdog:
         self.arp_guard: Optional[ArpPoisonGuard] = None
         self.icmp_redirect_enabled = icmp_redirect_enabled
         self.icmp_guard: Optional[IcmpRedirectGuard] = None
+        self.ssdp_listener: Optional[SsdpListener] = None
         self.sync_db = sync_db
         self.web_enabled = web_enabled
         self.web_host = web_host
@@ -154,6 +156,10 @@ class SentinelWatchdog:
             if self.icmp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ICMP Redirect Route Hijacking Guard active.{Colors.RESET}")
 
+        self.ssdp_listener = SsdpListener(interface_ip=local_ip)
+        if self.ssdp_listener.start():
+            print(f"{Colors.GREEN}[+] SSDP / UPnP Device Harvester active.{Colors.RESET}")
+
         if self.web_enabled:
             self.web_server = LightweightWebServer(
                 state=self.web_state,
@@ -182,6 +188,7 @@ class SentinelWatchdog:
                 "dhcp_starvation": bool(self.dhcp_guard),
                 "arp_poison": bool(self.arp_guard),
                 "icmp_redirect": bool(self.icmp_guard),
+                "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
             }
 
         try:
@@ -343,3 +350,7 @@ class SentinelWatchdog:
                 self.dhcp_guard.stop()
             if self.arp_guard:
                 self.arp_guard.stop()
+            if self.icmp_guard:
+                self.icmp_guard.stop()
+            if self.ssdp_listener:
+                self.ssdp_listener.stop()

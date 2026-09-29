@@ -1,7 +1,7 @@
 {
-  "version": "1.0.0",
-  "updated_at": "2026-09-28T23:30:00Z",
-  "description": "Alien Hunter canonical device fingerprint database (DHCP Option 55/60 & mDNS DNS-SD).",
+  "version": "1.1.0",
+  "updated_at": "2026-09-29T14:35:00Z",
+  "description": "Alien Hunter canonical device fingerprint database (DHCP Option 55/60, mDNS, SSDP/UPnP & TCP SYN).",
   "dhcp_signatures": [
     {
       "vendor": "Apple iOS (iPhone / iPad)",
@@ -219,5 +219,184 @@
       "category": "NAS / Storage",
       "os_family": "AFP Server"
     }
-  }
+  },
+  "ssdp_signatures": [
+    {
+      "vendor": "Samsung Smart TV",
+      "category": "Smart TV / Entertainment",
+      "os_family": "Tizen OS",
+      "server_pattern": "(?i)(samsung|sec_tizen|tizen)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "LG Smart TV",
+      "category": "Smart TV / Entertainment",
+      "os_family": "webOS",
+      "server_pattern": "(?i)(lge?_tv|webos|netcast)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Sony Bravia TV / Audio",
+      "category": "Smart TV / Entertainment",
+      "os_family": "Sony Android TV",
+      "server_pattern": "(?i)(sony|bravia)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Roku Streaming Device",
+      "category": "Streaming Media Player",
+      "os_family": "Roku OS",
+      "server_pattern": "(?i)roku",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Google Nest / Chromecast",
+      "category": "Smart Speaker / Entertainment",
+      "os_family": "Cast OS",
+      "server_pattern": "(?i)(google.*cast|eureka)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Amazon Echo / Fire TV",
+      "category": "Smart Home / Entertainment",
+      "os_family": "Fire OS",
+      "server_pattern": "(?i)(firetv|amzn.*echo|alexa)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Philips Hue Bridge",
+      "category": "Smart Home / IoT",
+      "os_family": "Hue OS",
+      "server_pattern": "(?i)(philips-hue|ipbridge)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Sonos Smart Speaker",
+      "category": "Smart Speaker / Audio",
+      "os_family": "Sonos OS",
+      "server_pattern": "(?i)sonos",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Synology DiskStation",
+      "category": "NAS / Storage",
+      "os_family": "DiskStation Manager (DSM)",
+      "server_pattern": "(?i)synology",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "QNAP Turbo NAS",
+      "category": "NAS / Storage",
+      "os_family": "QTS / QuTS",
+      "server_pattern": "(?i)qnap",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Microsoft Windows Host (UPnP)",
+      "category": "Laptop / Workstation",
+      "os_family": "Windows",
+      "server_pattern": "(?i)(microsoft-windows/|windows.*upnp)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Belkin WeMo Smart Device",
+      "category": "Smart Home / IoT",
+      "os_family": "WeMo Firmware",
+      "server_pattern": "(?i)(wemo|belkin)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "TP-Link Smart Home (Kasa/Tapo)",
+      "category": "Smart Home / IoT",
+      "os_family": "TP-Link Firmware",
+      "server_pattern": "(?i)(tp-link|kasa|tapo)",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Sony PlayStation Console",
+      "category": "Gaming Console",
+      "os_family": "PlayStation OS",
+      "server_pattern": "(?i)playstation",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Microsoft Xbox Console",
+      "category": "Gaming Console",
+      "os_family": "Xbox OS",
+      "server_pattern": "(?i)xbox",
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Network Printer / MFD",
+      "category": "Network Printer",
+      "os_family": "Printer Firmware",
+      "server_pattern": "(?i)(canon|epson|brother|hp.*jetdirect|mfp)",
+      "confidence": "HIGH"
+    }
+  ],
+  "tcp_syn_signatures": [
+    {
+      "vendor": "Linux Kernel 4.x - 6.x / Android",
+      "category": "Laptop / Workstation",
+      "os_family": "Linux",
+      "initial_ttl": 64,
+      "options": [2, 4, 8, 1, 3],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Linux Host (Embedded / Minimal)",
+      "category": "Smart Home / IoT",
+      "os_family": "Linux",
+      "initial_ttl": 64,
+      "options": [2, 4, 1, 3],
+      "confidence": "MEDIUM"
+    },
+    {
+      "vendor": "Microsoft Windows 10/11 / Server",
+      "category": "Laptop / Workstation",
+      "os_family": "Windows",
+      "initial_ttl": 128,
+      "options": [2, 1, 3, 1, 1, 4],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Microsoft Windows (Timestamped)",
+      "category": "Laptop / Workstation",
+      "os_family": "Windows",
+      "initial_ttl": 128,
+      "options": [2, 1, 3, 1, 1, 4, 8],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple Darwin (macOS / iOS)",
+      "category": "Laptop / Workstation",
+      "os_family": "macOS / iOS",
+      "initial_ttl": 64,
+      "options": [2, 1, 3, 1, 1, 8, 4, 0],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "Apple Darwin (macOS / iOS Alternative)",
+      "category": "Laptop / Workstation",
+      "os_family": "macOS / iOS",
+      "initial_ttl": 64,
+      "options": [2, 1, 3, 1, 1, 4, 8],
+      "confidence": "HIGH"
+    },
+    {
+      "vendor": "FreeBSD / Unix",
+      "category": "Server / Workstation",
+      "os_family": "FreeBSD / BSD",
+      "initial_ttl": 64,
+      "options": [2, 1, 3, 4, 1, 1, 8],
+      "confidence": "MEDIUM"
+    },
+    {
+      "vendor": "Network Appliance / Router",
+      "category": "Network Infrastructure",
+      "os_family": "Embedded Network OS",
+      "initial_ttl": 255,
+      "confidence": "MEDIUM"
+    }
+  ]
 }

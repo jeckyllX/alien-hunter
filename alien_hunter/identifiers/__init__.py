@@ -7,9 +7,15 @@ from .signatures import (
     DeviceFingerprintMatch,
     DhcpSignature,
     MdnsSignature,
+    SsdpSignature,
+    TcpSynSignature,
     DhcpFingerprintStore,
+    SsdpFingerprintStore,
+    TcpSynFingerprintStore,
 )
 from .sync import SignatureSyncEngine
+from .ssdp import SsdpParser, SsdpListener
+from .tcp_syn import TcpSynParser
 
 __all__ = [
     "MacVendorResolver",
@@ -18,6 +24,13 @@ __all__ = [
     "DeviceFingerprintMatch",
     "DhcpSignature",
     "MdnsSignature",
+    "SsdpSignature",
+    "TcpSynSignature",
     "DhcpFingerprintStore",
+    "SsdpFingerprintStore",
+    "TcpSynFingerprintStore",
     "SignatureSyncEngine",
+    "SsdpParser",
+    "SsdpListener",
+    "TcpSynParser",
 ]
