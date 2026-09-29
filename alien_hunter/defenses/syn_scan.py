@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..identifiers.tcp_syn import TcpSynParser
+
 
 class SynScanEvent:
     """Represents a detected stealth TCP port scan or probe activity."""
@@ -210,6 +212,10 @@ class SynScanDetector:
         elif (flags & 0x02) != 0 and (flags & 0x10) == 0 and (flags & 0x04) == 0:
             # SYN flag set, ACK flag cleared, RST cleared
             scan_type = "SYN Scan"
+            try:
+                TcpSynParser.parse_frame(pkt, now=now)
+            except Exception:
+                pass
 
         if not scan_type:
             return None

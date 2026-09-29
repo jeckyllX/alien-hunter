@@ -10,6 +10,9 @@ import struct
 import time
 from typing import Dict, Optional
 
+from ..identifiers.tcp_syn import TcpSynParser
+from ..identifiers.ssdp import SsdpParser
+
 
 class PassiveFrameSniffer:
     """Captures and inspects raw Layer-2 Ethernet traffic to detect silent transmitters."""
@@ -91,6 +94,24 @@ class PassiveFrameSniffer:
                                         unadvertised[src_ip] = src_mac
                                 elif ip_obj.is_private or ip_obj.is_link_local:
                                     unadvertised[src_ip] = src_mac
+
+                                # Passive TCP SYN and SSDP protocol unmasking
+                                ip_proto = pkt[23]
+                                if ip_proto == 6:  # TCP
+                                    try:
+                                        TcpSynParser.parse_frame(pkt)
+                                    except Exception:
+                                        pass
+                                elif ip_proto == 17 and len(pkt) >= 42:  # UDP
+                                    try:
+                                        ihl = (pkt[14] & 0x0F) * 4
+                                        if len(pkt) >= 14 + ihl + 8:
+                                            dst_port = struct.unpack("!H", pkt[14 + ihl + 2 : 14 + ihl + 4])[0]
+                                            if dst_port == 1900:
+                                                payload = pkt[14 + ihl + 8 :]
+                                                SsdpParser.process_payload(payload, src_ip)
+                                    except Exception:
+                                        pass
                             except Exception:
                                 pass
                 except socket.timeout:
