@@ -14,6 +14,7 @@ from ..defenses.dns_tunneling import DnsTunnelingDetector
 from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
 from ..defenses.icmp_redirect import IcmpRedirectGuard
+from ..defenses.rogue_dhcp import RogueDhcpGuard
 from ..identifiers.ssdp import SsdpListener
 from ..web.state import SentinelState
 from ..web.server import LightweightWebServer
@@ -41,6 +42,7 @@ class SentinelWatchdog:
         dhcp_starvation_enabled: bool = True,
         arp_poison_enabled: bool = True,
         icmp_redirect_enabled: bool = True,
+        rogue_dhcp_enabled: bool = True,
         sync_db: bool = True,
         web_enabled: bool = False,
         web_host: str = "0.0.0.0",
@@ -68,6 +70,8 @@ class SentinelWatchdog:
         self.arp_guard: Optional[ArpPoisonGuard] = None
         self.icmp_redirect_enabled = icmp_redirect_enabled
         self.icmp_guard: Optional[IcmpRedirectGuard] = None
+        self.rogue_dhcp_enabled = rogue_dhcp_enabled
+        self.rogue_dhcp_guard: Optional[RogueDhcpGuard] = None
         self.ssdp_listener: Optional[SsdpListener] = None
         self.sync_db = sync_db
         self.web_enabled = web_enabled
@@ -156,6 +160,15 @@ class SentinelWatchdog:
             if self.icmp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ICMP Redirect Route Hijacking Guard active.{Colors.RESET}")
 
+        if self.rogue_dhcp_enabled:
+            self.rogue_dhcp_guard = RogueDhcpGuard(
+                interface=self.interface,
+                gateway_ip=gateway_ip,
+                gateway_mac=gateway_mac,
+            )
+            if self.rogue_dhcp_guard.start():
+                print(f"{Colors.GREEN}[+] Rogue DHCP Server & Gateway Hijack Guard active.{Colors.RESET}")
+
         self.ssdp_listener = SsdpListener(interface_ip=local_ip)
         if self.ssdp_listener.start():
             print(f"{Colors.GREEN}[+] SSDP / UPnP Device Harvester active.{Colors.RESET}")
@@ -188,6 +201,7 @@ class SentinelWatchdog:
                 "dhcp_starvation": bool(self.dhcp_guard),
                 "arp_poison": bool(self.arp_guard),
                 "icmp_redirect": bool(self.icmp_guard),
+                "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
                 "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
             }
 
@@ -237,6 +251,11 @@ class SentinelWatchdog:
                                 gateway_ip=result.network.gateway_ip,
                                 local_ip=result.network.local_ip,
                             )
+                        if self.rogue_dhcp_guard:
+                            self.rogue_dhcp_guard.update_topology(
+                                gateway_ip=result.network.gateway_ip,
+                                gateway_mac=result.network.gateway_mac,
+                            )
 
                     # Check for honeypot intrusions
                     honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []
@@ -274,6 +293,12 @@ class SentinelWatchdog:
                         for it in icmp_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {it}{Colors.RESET}")
 
+                    # Check for rogue DHCP servers & gateway hijacking
+                    rogue_dhcp_threats = self.rogue_dhcp_guard.get_threat_strings() if self.rogue_dhcp_guard else []
+                    if rogue_dhcp_threats:
+                        for rdt in rogue_dhcp_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {rdt}{Colors.RESET}")
+
                     combined_threats = (
                         result.threats
                         + honey_threats
@@ -282,6 +307,7 @@ class SentinelWatchdog:
                         + dhcp_threats
                         + arp_threats
                         + icmp_threats
+                        + rogue_dhcp_threats
                     )
 
                     if self.web_state:
@@ -296,6 +322,8 @@ class SentinelWatchdog:
                                 "dhcp_starvation": bool(self.dhcp_guard),
                                 "arp_poison": bool(self.arp_guard),
                                 "icmp_redirect": bool(self.icmp_guard),
+                                "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
+                                "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
                             },
                         )
 
@@ -303,7 +331,7 @@ class SentinelWatchdog:
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats or icmp_threats:
+                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats or icmp_threats or rogue_dhcp_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(

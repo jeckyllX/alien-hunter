@@ -17,6 +17,7 @@ from .defenses.syn_scan import SynScanDetector
 from .defenses.dns_tunneling import DnsTunnelingDetector
 from .defenses.dhcp_starvation import DhcpStarvationGuard
 from .defenses.arp_poison import ArpPoisonGuard
+from .defenses.rogue_dhcp import RogueDhcpGuard
 
 
 class ThreatDetector:
@@ -89,141 +90,20 @@ class ThreatDetector:
         interface: Optional[str] = None,
         local_mac: Optional[str] = None,
         gateway_ip: Optional[str] = None,
+        gateway_mac: Optional[str] = None,
         timeout: float = 2.0,
     ) -> List[str]:
         """
-        Broadcasts a DHCP Discover probe (UDP 67/68) to discover active DHCP servers.
-        Detects Rogue DHCP servers, unauthorized gateways, and DHCP hijacking attacks.
+        Emits a canary DHCP Discover probe (UDP 67/68) and listens for rogue DHCP servers,
+        unauthorized gateways, and DHCP hijacking attacks.
         """
-        import os
-        import socket
-        import time
-        from .scanners.net_utils import create_udp_socket
-
-        threats: List[str] = []
-        sock = None
-
-        try:
-            sock = create_udp_socket(interface=interface, timeout=0.5)
-            sock.bind(("0.0.0.0", 68))
-
-            mac_bytes = b"\x00" * 6
-            if local_mac:
-                try:
-                    cleaned_mac = local_mac.replace(":", "").replace("-", "")
-                    if len(cleaned_mac) == 12:
-                        mac_bytes = bytes.fromhex(cleaned_mac)
-                except Exception:
-                    pass
-            if mac_bytes == b"\x00" * 6:
-                mac_bytes = b"\x02\x42" + os.urandom(4)
-
-            xid = os.urandom(4)
-            pkt = bytearray(240)
-            pkt[0] = 1  # BOOTREQUEST
-            pkt[1] = 1  # HTYPE: 10mb ethernet
-            pkt[2] = 6  # HLEN: 6 bytes mac
-            pkt[3] = 0  # HOPS
-            pkt[4:8] = xid
-            pkt[8:10] = b"\x00\x00"  # SECS
-            pkt[10:12] = b"\x80\x00"  # FLAGS: Broadcast
-            pkt[12:16] = b"\x00\x00\x00\x00"  # CIADDR
-            pkt[16:20] = b"\x00\x00\x00\x00"  # YIADDR
-            pkt[20:24] = b"\x00\x00\x00\x00"  # SIADDR
-            pkt[24:28] = b"\x00\x00\x00\x00"  # GIADDR
-            pkt[28 : 28 + len(mac_bytes)] = mac_bytes
-            pkt[236:240] = b"\x63\x82\x53\x63"  # Magic cookie
-
-            pkt.extend(b"\x35\x01\x01")  # Option 53: DHCP Discover
-            pkt.extend(b"\x37\x04\x01\x03\x06\x36")  # Option 55: Parameter Request List
-            pkt.extend(b"\xff")  # Option 255: End of options
-
-            sock.sendto(pkt, ("255.255.255.255", 67))
-
-            observed_servers: Dict[str, Dict[str, str]] = {}
-            start = time.time()
-
-            while time.time() - start < timeout:
-                try:
-                    data, addr = sock.recvfrom(2048)
-                    if len(data) < 240 or data[4:8] != xid:
-                        continue
-
-                    options = data[240:]
-                    opt_dict: Dict[int, bytes] = {}
-                    idx = 0
-                    while idx < len(options):
-                        opt = options[idx]
-                        if opt == 255:
-                            break
-                        if opt == 0:
-                            idx += 1
-                            continue
-                        if idx + 1 >= len(options):
-                            break
-                        opt_len = options[idx + 1]
-                        opt_val = options[idx + 2 : idx + 2 + opt_len]
-                        opt_dict[opt] = opt_val
-                        idx += 2 + opt_len
-
-                    msg_type = opt_dict.get(53)
-                    if not msg_type or msg_type[0] != 2:
-                        continue
-
-                    server_ip = addr[0]
-                    if 54 in opt_dict and len(opt_dict[54]) == 4:
-                        server_ip = socket.inet_ntoa(opt_dict[54])
-
-                    router_ip = ""
-                    if 3 in opt_dict and len(opt_dict[3]) >= 4:
-                        router_ip = socket.inet_ntoa(opt_dict[3][:4])
-
-                    offered_ip = socket.inet_ntoa(data[16:20])
-
-                    observed_servers[server_ip] = {
-                        "offered_ip": offered_ip,
-                        "router": router_ip,
-                        "relay_or_source": addr[0],
-                    }
-
-                except socket.timeout:
-                    continue
-                except Exception:
-                    break
-
-            for srv_ip, srv_details in observed_servers.items():
-                offered_router = srv_details.get("router", "")
-                offered_ip = srv_details.get("offered_ip", "")
-
-                if gateway_ip and srv_ip != gateway_ip and srv_details.get("relay_or_source") != gateway_ip:
-                    threats.append(
-                        f"CRITICAL: Rogue DHCP Server detected! Server at {srv_ip} offered lease {offered_ip} "
-                        f"(Advertised Router: {offered_router or 'None'}, Legitimate Gateway: {gateway_ip})! "
-                        f"Potential Man-in-the-Middle or rogue router on the network."
-                    )
-                elif gateway_ip and offered_router and offered_router != gateway_ip:
-                    threats.append(
-                        f"CRITICAL: DHCP Gateway Hijacking detected! DHCP Server {srv_ip} is offering default "
-                        f"gateway {offered_router} (Expected legitimate Gateway: {gateway_ip})!"
-                    )
-
-            if len(observed_servers) > 1:
-                server_list = ", ".join(sorted(observed_servers.keys()))
-                threats.append(
-                    f"WARNING: Multiple DHCP Servers active on the local link: {server_list}. "
-                    f"Rogue or redundant DHCP services can cause IP address conflicts and session hijacking."
-                )
-
-        except Exception:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
-
-        return threats
+        guard = RogueDhcpGuard(
+            interface=interface,
+            gateway_ip=gateway_ip,
+            gateway_mac=gateway_mac,
+        )
+        events = guard.probe_canary(timeout=timeout, canary_mac=local_mac)
+        return [e.to_threat_string() for e in events]
 
     @staticmethod
     def check_llmnr_poisoning(
