@@ -546,6 +546,7 @@ class DiscoveryEngine:
                 interface=net_info.interface,
                 local_mac=net_info.local_mac,
                 gateway_ip=net_info.gateway_ip,
+                gateway_mac=net_info.gateway_mac,
             )
         )
         # c) Active LLMNR / NBT-NS Poisoning Canary Trap (Anti-Responder)
