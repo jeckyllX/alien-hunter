@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .arp_healing import ArpSelfHealing
+
 
 class ArpPoisonEvent:
     """Represents a detected ARP cache poisoning or spoofing event."""
@@ -95,6 +97,8 @@ class ArpPoisonGuard:
         garp_burst_threshold: int = 5,
         garp_window_seconds: float = 2.0,
         alert_cooldown: float = 30.0,
+        self_healing_enabled: bool = True,
+        healer: Optional[ArpSelfHealing] = None,
     ):
         self.interface = interface
         self.gateway_ip = gateway_ip
@@ -106,6 +110,10 @@ class ArpPoisonGuard:
         self.garp_burst_threshold = garp_burst_threshold
         self.garp_window_seconds = garp_window_seconds
         self.alert_cooldown = alert_cooldown
+        self.self_healing_enabled = self_healing_enabled
+        self.healer: Optional[ArpSelfHealing] = healer or (
+            ArpSelfHealing(interface=self.interface) if self_healing_enabled else None
+        )
 
         # Gratuitous ARP tracking: sender_mac -> list of timestamps
         self._garp_history: Dict[str, collections.deque] = collections.defaultdict(collections.deque)
@@ -133,6 +141,13 @@ class ArpPoisonGuard:
                 for ip, mac in trusted_ip_mac_map.items():
                     if mac and mac != "N/A" and "Asleep" not in mac:
                         self.trusted_ip_mac_map[ip] = mac.upper()
+
+            if self.healer and self.interface:
+                self.healer.interface = self.interface
+
+    @property
+    def is_self_healing_enabled(self) -> bool:
+        return self.self_healing_enabled and self.healer is not None
 
     @staticmethod
     def parse_arp_packet(pkt: bytes) -> Optional[Dict[str, Any]]:
@@ -178,6 +193,7 @@ class ArpPoisonGuard:
         """
         Processes a raw Ethernet frame. Returns an ArpPoisonEvent if active
         spoofing, gateway masquerade, or suspicious ARP manipulation is detected.
+        Triggers active self-healing if enabled.
         """
         parsed = self.parse_arp_packet(pkt)
         if not parsed:
@@ -197,6 +213,14 @@ class ArpPoisonGuard:
             # 1. Gateway Poisoning: sender_ip is gateway_ip but sender_mac != gateway_mac
             if self.gateway_ip and self.gateway_mac:
                 if sender_ip == self.gateway_ip and sender_mac != self.gateway_mac:
+                    if self.healer:
+                        self.healer.heal(
+                            spoofed_ip=sender_ip,
+                            legitimate_mac=self.gateway_mac,
+                            attacker_mac=sender_mac,
+                            threat_type="GATEWAY_POISONING",
+                            now=now,
+                        )
                     key = ("GATEWAY_POISONING", sender_ip, sender_mac)
                     if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
                         self._last_alert_times[key] = now
@@ -232,6 +256,14 @@ class ArpPoisonGuard:
             if op == 2 and sender_ip in self.trusted_ip_mac_map:
                 expected = self.trusted_ip_mac_map[sender_ip]
                 if expected and sender_mac != expected:
+                    if self.healer:
+                        self.healer.heal(
+                            spoofed_ip=sender_ip,
+                            legitimate_mac=expected,
+                            attacker_mac=sender_mac,
+                            threat_type="IP_MAC_FLIP",
+                            now=now,
+                        )
                     key = ("IP_MAC_FLIP", sender_ip, sender_mac)
                     if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
                         self._last_alert_times[key] = now

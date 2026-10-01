@@ -263,15 +263,18 @@ class ThreatDetector:
         gateway_mac: Optional[str] = None,
         trusted_ip_mac_map: Optional[Dict[str, str]] = None,
         duration: float = 1.0,
+        self_healing: bool = True,
     ) -> List[str]:
         """
         Passively sniffs raw Layer-2 ARP traffic to detect active ARP cache poisoning and gateway spoofing.
+        Actively neutralizes attacks via self-healing Gratuitous ARPs when enabled.
         """
         guard = ArpPoisonGuard(
             interface=interface,
             gateway_ip=gateway_ip,
             gateway_mac=gateway_mac,
             trusted_ip_mac_map=trusted_ip_mac_map,
+            self_healing_enabled=self_healing,
         )
         events = guard.sniff(duration=duration)
         return [e.to_threat_string() for e in events]

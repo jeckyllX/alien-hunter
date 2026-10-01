@@ -540,6 +540,7 @@ async function fetchData() {
       { key: 'dhcp_starvation', label: 'DHCP Starvation' },
       { key: 'rogue_dhcp', label: 'Rogue DHCP Guard' },
       { key: 'arp_poison', label: 'ARP Poison Guard' },
+      { key: 'arp_self_healing', label: 'ARP Self-Healing IPS' },
       { key: 'icmp_redirect', label: 'ICMP Redirect Guard' },
       { key: 'ssdp_harvester', label: 'SSDP Harvester' }
     ];

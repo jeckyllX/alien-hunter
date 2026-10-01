@@ -147,9 +147,10 @@ class SentinelWatchdog:
                 interface=self.interface,
                 gateway_ip=gateway_ip,
                 gateway_mac=gateway_mac,
+                self_healing_enabled=True,
             )
             if self.arp_guard.start():
-                print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning & Gateway Masquerade Guard active.{Colors.RESET}")
+                print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning Guard & Self-Healing IPS active.{Colors.RESET}")
 
         if self.icmp_redirect_enabled:
             self.icmp_guard = IcmpRedirectGuard(
@@ -200,6 +201,7 @@ class SentinelWatchdog:
                 "dns_tunneling": bool(self.dns_tunnel_detector),
                 "dhcp_starvation": bool(self.dhcp_guard),
                 "arp_poison": bool(self.arp_guard),
+                "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
                 "icmp_redirect": bool(self.icmp_guard),
                 "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
                 "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
@@ -321,6 +323,7 @@ class SentinelWatchdog:
                                 "dns_tunneling": bool(self.dns_tunnel_detector),
                                 "dhcp_starvation": bool(self.dhcp_guard),
                                 "arp_poison": bool(self.arp_guard),
+                                "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
                                 "icmp_redirect": bool(self.icmp_guard),
                                 "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
                                 "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
