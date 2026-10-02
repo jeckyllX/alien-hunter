@@ -56,6 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-ai", action="store_true", help="Test the configured AI provider with a simulated alien device")
     parser.add_argument("--update-signatures", action="store_true", help="Download and synchronize the latest device signatures feed")
     parser.add_argument("--force-sync", action="store_true", help="Force signature synchronization bypassing 24h interval check")
+    parser.add_argument("--set-ai-provider", type=str, metavar="NAME", help="Switch active AI provider in config.json (e.g. ollama, openrouter, groq)")
+    parser.add_argument("--ai-provider", type=str, metavar="NAME", help="Temporarily override AI provider for this run")
     return parser
 
 
@@ -64,8 +66,43 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if not args.test_notify and not args.test_ai and not args.update_signatures:
+    if (
+        not args.test_notify
+        and not args.test_ai
+        and not args.update_signatures
+        and not args.set_ai_provider
+    ):
         ensure_root()
+
+    if args.set_ai_provider:
+        target_provider = args.set_ai_provider.strip().lower()
+        valid_providers = sorted(set(AIEngine.PROVIDER_REGISTRY.keys()))
+        if target_provider not in valid_providers:
+            print(f"{Colors.RED}[-] Unknown AI provider '{target_provider}'. Valid choices: {', '.join(valid_providers)}{Colors.RESET}")
+            sys.exit(1)
+
+        config_mgr = ConfigManager()
+        config_path = config_mgr.resolve_path("config.json", args.config_file)
+        config = config_mgr.load_config(config_path)
+        if "ai_analysis" not in config or not isinstance(config["ai_analysis"], dict):
+            config["ai_analysis"] = {"enabled": True}
+        config["ai_analysis"]["provider"] = target_provider
+        if not config_mgr.save_config(config, config_path):
+            print(f"{Colors.RED}[-] Failed to write updated configuration to {config_path}. Check file permissions.{Colors.RESET}")
+            sys.exit(1)
+
+        print(f"{Colors.GREEN}[+] Active AI provider set to '{target_provider}' in {config_path}{Colors.RESET}")
+
+        import subprocess
+        try:
+            res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
+            if res.returncode == 0:
+                print(f"{Colors.CYAN}[*] Restarting alien-hunter.service...{Colors.RESET}")
+                subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+        except Exception:
+            pass
+        sys.exit(0)
 
     if args.update_signatures:
         from .identifiers.sync import SignatureSyncEngine
@@ -102,6 +139,14 @@ def main():
         ai_enabled = True
     elif args.no_ai:
         ai_enabled = False
+
+    if args.ai_provider:
+        target_provider = args.ai_provider.strip().lower()
+        valid_providers = sorted(set(AIEngine.PROVIDER_REGISTRY.keys()))
+        if target_provider not in valid_providers:
+            print(f"{Colors.RED}[-] Unknown AI provider '{target_provider}'. Valid choices: {', '.join(valid_providers)}{Colors.RESET}")
+            sys.exit(1)
+        ai_cfg["provider"] = target_provider
 
     if ai_enabled or args.test_ai:
         ai_cfg["enabled"] = True

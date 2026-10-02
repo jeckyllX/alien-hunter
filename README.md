@@ -199,6 +199,8 @@ sudo ./alien_hunter.py --web --web-port 8080
 | `--ai` | Enables AI risk profiling. |
 | `--no-ai` | Disables AI risk profiling. |
 | `--test-ai` | Runs a test query against the configured AI provider. |
+| `--set-ai-provider <name>` | Switches active AI provider in `config.json` and reloads systemd service. |
+| `--ai-provider <name>` | Temporarily overrides active AI provider for the current execution. |
 | `--update-signatures` | Downloads and synchronizes the latest device fingerprint signatures from upstream. |
 | `--force-sync` | Forces signature synchronization, bypassing the 24-hour rate limit threshold. |
 | `--json` | Outputs results in machine-readable JSON format. |
@@ -275,22 +277,60 @@ Example schema:
   "ai_analysis": {
     "enabled": false,
     "provider": "ollama",
-    "endpoint": "http://localhost:11434",
-    "model": "qwen2.5:0.5b",
-    "api_key": "",
     "timeout_seconds": 90,
+    "max_tokens": 1500,
     "analyze_on": "alien_only",
-    "cache_results": true
+    "cache_results": true,
+    "providers": {
+      "ollama": {
+        "endpoint": "http://localhost:11434",
+        "model": "qwen2.5:0.5b",
+        "api_key": ""
+      },
+      "openrouter": {
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "openrouter/free",
+        "api_key": "YOUR_OPENROUTER_API_KEY"
+      },
+      "groq": {
+        "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
+        "api_key": "YOUR_GROQ_API_KEY"
+      }
+    }
   }
 }
 ```
 
-### 3. AI Providers
+### 3. AI Providers & Profile Switching
+
 Supported values for `"provider"`:
-* `ollama`: Local inference (e.g., `qwen2.5:0.5b`, `llama3.2:1b`). No API key required.
-* `openai_compatible`: OpenAI-compatible endpoints (Groq, OpenAI, OpenRouter, DeepSeek, LM Studio). Set `"api_key"` if authentication is required.
-* `anthropic`: Anthropic Messages API. Requires `"api_key"`.
-* `gemini`: Google Gemini REST API. Requires `"api_key"`.
+* `openrouter`: OpenRouter API (`https://openrouter.ai/api/v1/chat/completions`). Supports reasoning models and free tier (`openrouter/free`). Requires `"api_key"`.
+* `ollama`: Local inference (`http://localhost:11434`, default model `qwen2.5:0.5b`). No API key required.
+* `groq`: Groq Cloud inference (`https://api.groq.com/openai/v1/chat/completions`, default `llama-3.3-70b-versatile`). Requires `"api_key"`.
+* `deepseek`: DeepSeek API (`https://api.deepseek.com/v1/chat/completions`, default `deepseek-chat`). Requires `"api_key"`.
+* `openai`: OpenAI API (`https://api.openai.com/v1/chat/completions`, default `gpt-4o-mini`). Requires `"api_key"`.
+* `openai_compatible`: Generic OpenAI-compatible completions endpoint.
+* `anthropic`: Anthropic Messages API (`claude-3-5-haiku-latest`). Requires `"api_key"`.
+* `gemini`: Google Gemini REST API (`gemini-2.0-flash`). Requires `"api_key"`.
+
+#### Switching Providers
+
+You can switch active providers instantly using the CLI:
+```bash
+# Switch to OpenRouter
+python3 alien_hunter.py --set-ai-provider openrouter
+
+# Switch to local Ollama
+python3 alien_hunter.py --set-ai-provider ollama
+```
+This updates `"provider"` in `config.json` and automatically restarts `alien-hunter.service` if active.
+
+To test a specific provider without modifying `config.json`:
+```bash
+python3 alien_hunter.py --test-ai --ai-provider openrouter
+python3 alien_hunter.py --test-ai --ai-provider ollama
+```
 
 ---
 

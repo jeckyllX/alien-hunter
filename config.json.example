@@ -28,7 +28,24 @@
     "timeout_seconds": 90,
     "max_tokens": 1500,
     "analyze_on": "alien_only",
-    "cache_results": true
+    "cache_results": true,
+    "providers": {
+      "ollama": {
+        "endpoint": "http://localhost:11434",
+        "model": "qwen2.5:0.5b",
+        "api_key": ""
+      },
+      "openrouter": {
+        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+        "model": "openrouter/free",
+        "api_key": "YOUR_OPENROUTER_API_KEY"
+      },
+      "groq": {
+        "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+        "model": "llama-3.3-70b-versatile",
+        "api_key": "YOUR_GROQ_API_KEY"
+      }
+    }
   },
   "notifications": {
     "telegram": {

@@ -54,8 +54,15 @@ class AIEngine:
         if not provider_cls:
             return None
 
-        provider = provider_cls(ai_cfg)
-        return cls(provider=provider, config=ai_cfg)
+        merged_cfg = dict(ai_cfg)
+        providers_dict = ai_cfg.get("providers", {})
+        if isinstance(providers_dict, dict) and provider_name in providers_dict:
+            provider_profile = providers_dict[provider_name]
+            if isinstance(provider_profile, dict):
+                merged_cfg.update(provider_profile)
+
+        provider = provider_cls(merged_cfg)
+        return cls(provider=provider, config=merged_cfg)
 
     def _cache_key(self, device: Device) -> str:
         ports_str = ",".join(sorted(device.open_ports))

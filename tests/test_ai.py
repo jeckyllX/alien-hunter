@@ -2,6 +2,8 @@
 Unit tests for Alien Hunter AI risk assessment and engine logic.
 """
 
+import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -285,6 +287,63 @@ class TestAIEngine(unittest.TestCase):
         p2.analyze(Device(ip="10.0.0.2", mac="00:11:22:33:44:56"))
         sent_body2 = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
         self.assertEqual(sent_body2.get("max_tokens"), 2048)
+
+    def test_ai_engine_provider_profiles(self):
+        cfg = {
+            "ai_analysis": {
+                "enabled": True,
+                "provider": "ollama",
+                "providers": {
+                    "ollama": {
+                        "endpoint": "http://localhost:11434",
+                        "model": "qwen2.5:0.5b",
+                    },
+                    "openrouter": {
+                        "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+                        "model": "openrouter/free",
+                        "api_key": "sk-or-v1-profile-key",
+                    },
+                },
+            }
+        }
+        engine_ollama = AIEngine.from_config(cfg)
+        self.assertIsNotNone(engine_ollama)
+        self.assertEqual(engine_ollama.provider.name, "ollama")
+        self.assertEqual(engine_ollama.provider.model, "qwen2.5:0.5b")
+        self.assertEqual(engine_ollama.provider.endpoint, "http://localhost:11434")
+
+        # Switch active provider to openrouter
+        cfg["ai_analysis"]["provider"] = "openrouter"
+        engine_or = AIEngine.from_config(cfg)
+        self.assertIsNotNone(engine_or)
+        self.assertEqual(engine_or.provider.name, "openrouter")
+        self.assertEqual(engine_or.provider.model, "openrouter/free")
+        self.assertEqual(engine_or.provider.api_key, "sk-or-v1-profile-key")
+        self.assertEqual(engine_or.provider.endpoint, "https://openrouter.ai/api/v1/chat/completions")
+
+    def test_cli_set_ai_provider(self):
+        import tempfile
+        from alien_hunter.cli import build_parser, main
+        from alien_hunter.config import ConfigManager
+
+        with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as tmp:
+            tmp.write(json.dumps({"ai_analysis": {"enabled": True, "provider": "ollama"}}))
+            tmp_path = tmp.name
+
+        try:
+            with patch("sys.argv", ["alien-hunter", "--config-file", tmp_path, "--set-ai-provider", "openrouter"]):
+                with patch("subprocess.run") as mock_subproc:
+                    mock_subproc.return_value = MagicMock(returncode=1)
+                    with self.assertRaises(SystemExit) as cm:
+                        main()
+                    self.assertEqual(cm.exception.code, 0)
+
+            cfg_mgr = ConfigManager()
+            saved = cfg_mgr.load_config(tmp_path)
+            self.assertEqual(saved["ai_analysis"]["provider"], "openrouter")
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
 
 if __name__ == "__main__":
