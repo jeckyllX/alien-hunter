@@ -217,6 +217,47 @@ class TestAIEngine(unittest.TestCase):
         self.assertIn("unwhitelisted", posture.summary)
         self.assertEqual(posture.hardening_advice, ["Review new devices"])
 
+    def test_openrouter_provider_initialization(self):
+        from alien_hunter.ai.providers.openai_compatible import OpenAICompatibleProvider
+        cfg = {
+            "enabled": True,
+            "provider": "openrouter",
+            "api_key": "sk-or-v1-test",
+        }
+        provider = OpenAICompatibleProvider(cfg)
+        self.assertEqual(provider.name, "openrouter")
+        self.assertEqual(provider.endpoint, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(provider.model, "google/gemini-2.0-flash-001")
+        self.assertEqual(provider.api_key, "sk-or-v1-test")
+        self.assertEqual(provider.provider_label, "openrouter:google/gemini-2.0-flash-001")
+
+    @patch("urllib.request.urlopen")
+    def test_openrouter_headers(self, mock_urlopen):
+        from alien_hunter.ai.providers.openai_compatible import OpenAICompatibleProvider
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = (
+            b'{"choices": [{"message": {"content": "{\\"device_type\\": \\"Smart Bulb\\", '
+            b'\\"risk_level\\": \\"LOW\\", \\"summary\\": \\"IoT Bulb\\"}"}}]}'
+        )
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        cfg = {
+            "enabled": True,
+            "provider": "openrouter",
+            "api_key": "sk-or-v1-test-key",
+            "model": "anthropic/claude-3.5-haiku",
+        }
+        provider = OpenAICompatibleProvider(cfg)
+        dev = Device(ip="192.168.1.55", mac="00:11:22:33:44:55")
+        provider.analyze(dev)
+
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer sk-or-v1-test-key")
+        self.assertEqual(req.get_header("Http-referer"), "https://github.com/jekyll86/alien-hunter")
+        self.assertEqual(req.get_header("X-title"), "Alien Hunter")
+
 
 if __name__ == "__main__":
     unittest.main()
