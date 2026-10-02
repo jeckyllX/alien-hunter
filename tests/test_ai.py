@@ -258,6 +258,35 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(req.get_header("Http-referer"), "https://github.com/jekyll86/alien-hunter")
         self.assertEqual(req.get_header("X-title"), "Alien Hunter")
 
+    @patch("urllib.request.urlopen")
+    def test_max_tokens_configuration(self, mock_urlopen):
+        from alien_hunter.ai.providers.openai_compatible import OpenAICompatibleProvider
+        import json
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = (
+            b'{"choices": [{"message": {"content": "{\\"device_type\\": \\"Smart Bulb\\", '
+            b'\\"risk_level\\": \\"LOW\\", \\"summary\\": \\"IoT Bulb\\"}"}}]}'
+        )
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        # Default max_tokens
+        p1 = OpenAICompatibleProvider({"provider": "openrouter", "api_key": "test"})
+        self.assertEqual(p1.max_tokens, 1500)
+        p1.analyze(Device(ip="10.0.0.1", mac="00:11:22:33:44:55"))
+        sent_body = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        self.assertEqual(sent_body.get("max_tokens"), 1500)
+
+        # Custom max_tokens
+        p2 = OpenAICompatibleProvider({"provider": "openrouter", "api_key": "test", "max_tokens": 2048})
+        self.assertEqual(p2.max_tokens, 2048)
+        p2.analyze(Device(ip="10.0.0.2", mac="00:11:22:33:44:56"))
+        sent_body2 = json.loads(mock_urlopen.call_args[0][0].data.decode("utf-8"))
+        self.assertEqual(sent_body2.get("max_tokens"), 2048)
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -114,6 +114,7 @@ class BaseAIProvider(ABC):
         self.endpoint = str(config.get("endpoint", "")).strip()
         self.api_key = str(config.get("api_key", "")).strip()
         self.timeout = float(config.get("timeout_seconds", 120.0))
+        self.max_tokens = int(config.get("max_tokens", 1500))
 
     @property
     def provider_label(self) -> str:
@@ -384,7 +385,7 @@ class BaseAIProvider(ABC):
 
     @abstractmethod
     def _generate_content(
-        self, system_prompt: str, user_prompt: str, max_tokens: int = 300
+        self, system_prompt: str, user_prompt: str, max_tokens: int = 1500
     ) -> Optional[str]:
         """Subclasses implement provider-specific REST API call and return raw response text."""
         pass
@@ -393,7 +394,7 @@ class BaseAIProvider(ABC):
         """Analyzes a device by invoking _generate_content and parsing the returned JSON."""
         sys_prompt = self.build_system_prompt()
         usr_prompt = self.build_user_prompt(device, threats)
-        raw_text = self._generate_content(sys_prompt, usr_prompt, max_tokens=250)
+        raw_text = self._generate_content(sys_prompt, usr_prompt, max_tokens=self.max_tokens)
         return self._parse_response_json(raw_text, device=device) if raw_text else None
 
     def analyze_network_posture(self, audit: Any) -> Optional[NetworkPostureAssessment]:
@@ -401,7 +402,7 @@ class BaseAIProvider(ABC):
         posture = self.compute_posture(getattr(audit, "threats", []), getattr(audit, "alien_count", 0))
         sys_prompt = self.build_network_posture_system_prompt()
         usr_prompt = self.build_network_posture_user_prompt(audit, posture)
-        raw_text = self._generate_content(sys_prompt, usr_prompt, max_tokens=350)
+        raw_text = self._generate_content(sys_prompt, usr_prompt, max_tokens=self.max_tokens)
         if raw_text:
             return self._parse_posture_json(raw_text, posture=posture, audit=audit)
         return self._parse_posture_json("{}", posture=posture, audit=audit)

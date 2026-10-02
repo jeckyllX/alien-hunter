@@ -26,6 +26,7 @@
     "model": "qwen2.5:0.5b",
     "api_key": "",
     "timeout_seconds": 90,
+    "max_tokens": 1500,
     "analyze_on": "alien_only",
     "cache_results": true
   },
