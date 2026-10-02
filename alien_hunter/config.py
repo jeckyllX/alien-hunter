@@ -90,6 +90,10 @@ class ConfigManager:
         path = self.resolve_path("config.json", custom_path)
         return self.load_json(path, default={})
 
+    def save_config(self, config: Dict[str, Any], custom_path: Optional[str] = None) -> bool:
+        path = self.resolve_path("config.json", custom_path)
+        return self.save_json(path, config)
+
     def sync_device_inventory(
         self,
         devices: List[Any],
