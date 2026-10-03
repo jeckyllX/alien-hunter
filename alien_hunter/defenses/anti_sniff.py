@@ -37,6 +37,12 @@ class AntiSniffDetector:
         if not target_hosts or not interface or not local_ip or not local_mac:
             return threats
 
+        # Wi-Fi (802.11) and virtual interfaces handle multicast frames at the AP/bridge level.
+        # RFC 1112 all-hosts multicast MAC (01:00:5E:00:00:01) is accepted by standard non-promiscuous
+        # network stacks on modern OSes over wireless, producing false positives for all connected clients.
+        if interface.startswith(("wl", "wlan", "wifi", "ath", "ra", "wg", "tun", "tap")):
+            return []
+
         sock = None
         try:
             sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(cls.ETH_P_ARP))

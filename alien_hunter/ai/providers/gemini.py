@@ -15,10 +15,10 @@ class GeminiProvider(BaseAIProvider):
     def __init__(self, config: Dict[str, Any]):
         super().__init__("gemini", config)
         if not self.model:
-            self.model = "gemini-1.5-flash"
+            self.model = "gemini-flash-lite-latest"
 
     def _generate_content(
-        self, system_prompt: str, user_prompt: str, max_tokens: int = 300
+        self, system_prompt: str, user_prompt: str, max_tokens: int = 1500
     ) -> Optional[str]:
         if not self.api_key:
             return None

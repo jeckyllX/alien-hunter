@@ -69,6 +69,7 @@ button, select, input {
   outline: none;
 }
 button:hover { background: var(--bg-elevated); border-color: var(--accent-cyan); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary {
   background: rgba(6, 182, 212, 0.15);
   color: var(--accent-cyan);
@@ -212,7 +213,8 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
         <option value="60">Auto-refresh (60s)</option>
         <option value="0">Manual only</option>
       </select>
-      <button class="btn-primary" onclick="fetchData()">🔄 Refresh</button>
+      <button onclick="fetchData()">🔄 Refresh</button>
+      <button class="btn-primary" id="btnDeepScan" onclick="triggerManualScan(true)">🔍 Deep Scan</button>
     </div>
   </header>
 
@@ -429,6 +431,21 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
       <div id="detailThreats" style="font-size: 0.82rem; color: #fca5a5;"></div>
     </div>
 
+    <div class="detail-section" id="detailAiSection" style="display: none; background: rgba(147, 51, 234, 0.05); border: 1px solid rgba(147, 51, 234, 0.25); border-radius: 6px; padding: 12px; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <div class="detail-section-title" style="color: #c084fc; margin-bottom: 0;">🤖 AI Risk Assessment & Vulnerabilities</div>
+        <span id="detailAiRiskBadge" class="badge" style="font-size: 0.7rem;">--</span>
+      </div>
+      <div id="detailAiSummary" style="font-size: 0.85rem; margin-bottom: 8px;"></div>
+      <div id="detailAiVulnsContainer" style="display: none; margin-bottom: 8px;">
+        <div style="font-size: 0.75rem; text-transform: uppercase; color: #f87171; font-weight: 600; margin-bottom: 4px;">🛡️ Identified Vulnerabilities & Exposures:</div>
+        <div id="detailAiVulns" style="font-size: 0.82rem; color: #fca5a5;"></div>
+      </div>
+      <div style="font-size: 0.78rem; color: var(--text-dim);">
+        <strong>Recommendation:</strong> <span id="detailAiRec"></span> &bull; <strong>Action:</strong> <span id="detailAiAction"></span>
+      </div>
+    </div>
+
     <div class="detail-section" style="margin-top: 18px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
         <div class="detail-section-title" style="margin-bottom: 0;">Device Security Event Timeline</div>
@@ -464,6 +481,8 @@ let pollTimer = null;
 let cachedTrusted = [];
 let cachedAlien = [];
 let cachedEvents = [];
+let isScanTriggering = false;
+let scanPollInterval = null;
 
 async function fetchData() {
   try {
@@ -485,14 +504,30 @@ async function fetchData() {
     // Update daemon status indicator
     const pill = document.getElementById('statusPill');
     const statusText = document.getElementById('daemonStatusText');
-    if (resStatus.is_running) {
+    const btnScan = document.getElementById('btnDeepScan');
+    if (resStatus.is_scanning) {
+      statusText.textContent = 'SCANNING';
+      pill.style.borderColor = 'rgba(6, 182, 212, 0.4)';
+      pill.style.color = 'var(--accent-cyan)';
+      if (btnScan) {
+        btnScan.disabled = true;
+        btnScan.textContent = '⏳ Scanning...';
+      }
+    } else if (resStatus.is_running) {
       statusText.textContent = 'ONLINE';
       pill.style.borderColor = 'rgba(16, 185, 129, 0.3)';
       pill.style.color = 'var(--accent-green)';
+      if (btnScan && !isScanTriggering) {
+        btnScan.disabled = false;
+        btnScan.textContent = '🔍 Deep Scan';
+      }
     } else {
       statusText.textContent = 'STOPPED';
       pill.style.borderColor = 'rgba(239, 68, 68, 0.4)';
       pill.style.color = 'var(--accent-red)';
+      if (btnScan) {
+        btnScan.disabled = true;
+      }
     }
 
     function formatTimeAgo(secs) {
@@ -603,12 +638,20 @@ function renderAlienTable() {
     const ip = escapeHtml(dev.ip || '');
     const mac = escapeHtml(dev.mac || '');
     const name = escapeHtml(dev.hostname || dev.vendor || '');
+    const ai = dev.ai_assessment;
+    let aiBadge = '';
+    if (ai && ai.risk_level) {
+      const r = (ai.risk_level || '').toUpperCase();
+      const cls = (r === 'CRITICAL' || r === 'HIGH') ? 'badge-sev-critical' : (r === 'MEDIUM' ? 'badge-sev-warn' : 'badge-active');
+      const vulnCount = Array.isArray(ai.vulnerabilities) && ai.vulnerabilities.length > 0 ? ` [${ai.vulnerabilities.length} vuln${ai.vulnerabilities.length > 1 ? 's' : ''}]` : '';
+      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${r}${vulnCount}</span>`;
+    }
     return `
       <tr class="clickable-row" onclick="openDeviceDetails('${mac}')" title="Click to view full device telemetry and history">
         <td class="mono" style="font-weight: 600;">${ip}</td>
         <td class="mono">${mac}</td>
         <td>${escapeHtml(dev.vendor || 'Unknown')}</td>
-        <td>${escapeHtml(dev.hostname || dev.discovery_method || 'Unknown')}</td>
+        <td>${escapeHtml(dev.hostname || dev.discovery_method || 'Unknown')}${aiBadge}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
         <td>
           <button class="btn-success" onclick="event.stopPropagation(); openWhitelistModal('${mac}', '${ip}', '${name}')">
@@ -684,6 +727,14 @@ function renderTrustedTable() {
     const statusBadge = isOnline
       ? ` <span class="badge badge-active" style="font-size: 0.65rem; padding: 2px 6px;">Online</span>`
       : ` <span class="badge badge-inactive" style="font-size: 0.65rem; padding: 2px 6px;">Offline</span>`;
+    const ai = dev.ai_assessment;
+    let aiBadge = '';
+    if (ai && ai.risk_level && ai.risk_level.toUpperCase() !== 'LOW') {
+      const r = ai.risk_level.toUpperCase();
+      const cls = (r === 'CRITICAL' || r === 'HIGH') ? 'badge-sev-critical' : 'badge-sev-warn';
+      const vulnCount = Array.isArray(ai.vulnerabilities) && ai.vulnerabilities.length > 0 ? ` [${ai.vulnerabilities.length} vuln${ai.vulnerabilities.length > 1 ? 's' : ''}]` : '';
+      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${r}${vulnCount}</span>`;
+    }
     const ip = dev.ip || dev.primary_ip || '--';
     const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
     const aliases = aliasList.length > 0 ? `<div style="font-size: 0.7rem; color: var(--text-dim);">${escapeHtml(aliasList.join(', '))}</div>` : '';
@@ -692,7 +743,7 @@ function renderTrustedTable() {
 
     return `
       <tr class="clickable-row" onclick="openDeviceDetails('${dev.mac || ''}')" title="Click to view full device telemetry and history">
-        <td><strong>${escapeHtml(friendly)}</strong>${owner}${statusBadge}${hostSubtitle}</td>
+        <td><strong>${escapeHtml(friendly)}</strong>${owner}${statusBadge}${aiBadge}${hostSubtitle}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
         <td>${escapeHtml(dev.vendor || 'N/A')}</td>
@@ -766,6 +817,40 @@ function openDeviceDetails(mac) {
     document.getElementById('detailThreats').innerHTML = combinedNotes.map(t => `<div style="padding: 2px 0;">⚠️ ${escapeHtml(t)}</div>`).join('');
   } else {
     threatsSec.style.display = 'none';
+  }
+
+  // AI Assessment & Vulnerabilities
+  const ai = dev.ai_assessment;
+  const aiSec = document.getElementById('detailAiSection');
+  if (ai) {
+    aiSec.style.display = 'block';
+    const riskLevel = (ai.risk_level || 'UNKNOWN').toUpperCase();
+    const riskBadge = document.getElementById('detailAiRiskBadge');
+    riskBadge.textContent = `${riskLevel} RISK`;
+    if (riskLevel === 'CRITICAL' || riskLevel === 'HIGH') {
+      riskBadge.className = 'badge badge-sev-critical';
+    } else if (riskLevel === 'MEDIUM') {
+      riskBadge.className = 'badge badge-sev-warn';
+    } else {
+      riskBadge.className = 'badge badge-active';
+    }
+
+    document.getElementById('detailAiSummary').textContent = ai.summary || 'No summary available.';
+    document.getElementById('detailAiRec').textContent = ai.whitelist_recommendation || 'N/A';
+    document.getElementById('detailAiAction').textContent = ai.action_advice || 'None';
+
+    const vulns = Array.isArray(ai.vulnerabilities) ? ai.vulnerabilities : [];
+    const vulnsBox = document.getElementById('detailAiVulnsContainer');
+    const vulnsList = document.getElementById('detailAiVulns');
+    if (vulns.length > 0) {
+      vulnsBox.style.display = 'block';
+      vulnsList.innerHTML = vulns.map(v => `<div class="mono" style="padding: 2px 0;">• ${escapeHtml(v)}</div>`).join('');
+    } else {
+      vulnsBox.style.display = 'none';
+      vulnsList.innerHTML = '';
+    }
+  } else {
+    aiSec.style.display = 'none';
   }
 
   // Device Security Events
@@ -950,6 +1035,70 @@ function formatEventTime(ts) {
   } catch (e) {
     return `<span class="mono">${escapeHtml(ts)}</span>`;
   }
+}
+
+async function triggerManualScan(deep = true) {
+  if (isScanTriggering) return;
+  const btn = document.getElementById('btnDeepScan');
+  isScanTriggering = true;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ Triggering...';
+  }
+  showToast(deep ? 'Initiating manual deep scan with AI analysis...' : 'Initiating manual scan...');
+
+  try {
+    const res = await fetch(`/api/scan?deep=${deep ? 'true' : 'false'}&ai=true`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deep: deep, ai: true })
+    });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast('✓ Network scan queued. Gathering live telemetry...');
+      pollScanProgress();
+    } else {
+      showToast(`✘ Scan failed: ${data.message || 'Error'}`);
+      isScanTriggering = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔍 Deep Scan';
+      }
+    }
+  } catch (err) {
+    showToast(`✘ Failed to trigger scan: ${err.message}`);
+    isScanTriggering = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🔍 Deep Scan';
+    }
+  }
+}
+
+function pollScanProgress() {
+  if (scanPollInterval) clearInterval(scanPollInterval);
+  scanPollInterval = setInterval(async () => {
+    try {
+      const res = await fetch('/api/status');
+      if (res.ok) {
+        const status = await res.json();
+        if (!status.is_scanning) {
+          clearInterval(scanPollInterval);
+          scanPollInterval = null;
+          isScanTriggering = false;
+          const btn = document.getElementById('btnDeepScan');
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔍 Deep Scan';
+          }
+          showToast('✓ Network scan completed.');
+          fetchData();
+        }
+      }
+    } catch (e) {
+      // ignore transient network glitch while scanning
+    }
+  }, 2000);
 }
 
 function updatePolling() {

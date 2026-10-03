@@ -182,8 +182,11 @@ class BaseAIProvider(ABC):
             '  "risk_level": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",\n'
             '  "summary": "1-2 sentence executive summary of device function and risk",\n'
             '  "whitelist_recommendation": "ALLOW" | "INVESTIGATE" | "BLOCK",\n'
-            '  "action_advice": "1 concise, actionable recommendation for the administrator"\n'
-            "}"
+            '  "action_advice": "1 concise, actionable recommendation for the administrator",\n'
+            '  "vulnerabilities": ["Specific identified CVEs, daemon vulnerabilities, or security exposures from banners (or empty array if none)"]\n'
+            "}\n\n"
+            "### Vulnerability Evaluation\n"
+            "Evaluate observed protocol banners and service versions for known security weaknesses (e.g., outdated daemons, known unauthenticated exposure, unencrypted legacy protocols). Return identified vulnerabilities in the 'vulnerabilities' array (or empty array if none).\n"
         )
 
     def build_user_prompt(self, device: Device, threats: List[str] = None) -> str:
@@ -248,6 +251,8 @@ class BaseAIProvider(ABC):
             summary = str(data.get("summary", "No summary provided.")).strip()
             action = str(data.get("action_advice", "Monitor device traffic.")).strip()
             analysis = str(data.get("analysis", "")).strip()
+            vulns_raw = data.get("vulnerabilities", [])
+            vulnerabilities = [str(v).strip() for v in vulns_raw if str(v).strip()] if isinstance(vulns_raw, list) else []
 
             # If device type is unclassified or unknown, fall back to deterministic hint:
             if device and (not device_type or device_type.lower() in ("unknown", "unknown device")):
@@ -263,6 +268,7 @@ class BaseAIProvider(ABC):
                 action_advice=action,
                 provider=self.provider_label,
                 analysis=analysis,
+                vulnerabilities=vulnerabilities,
             )
         except Exception:
             return None

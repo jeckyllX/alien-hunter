@@ -7,7 +7,7 @@ and unauthenticated web management portals.
 import re
 import socket
 import urllib.request
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 
 
 SECURITY_PORT_SIGNATURES: Dict[int, Tuple[str, str, str]] = {
@@ -53,19 +53,50 @@ class PortScanner:
         except Exception:
             return False
 
-    def fetch_web_title(self, ip: str, port: int) -> str:
-        """Extracts the <title> tag from an HTTP service to aid in device identification."""
-        url = f"http://{ip}:{port}"
+    def probe_service_banner(self, ip: str, port: int, timeout: float = 0.4) -> Optional[str]:
+        """
+        Generic, protocol-agnostic banner extractor.
+        1. Listens for spontaneous server greetings on connect (SSH, FTP, SMTP, Telnet).
+        2. If silent, issues an HTTP probe and extracts Server header and HTML title.
+        Zero hardcoded port numbers.
+        """
+        # 1. Spontaneous server greeting on TCP connect
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "AlienHunter/1.0"})
-            with urllib.request.urlopen(req, timeout=1.0) as resp:
-                content = resp.read(2048).decode("utf-8", errors="ignore")
-                match = re.search(r"<title[^>]*>(.*?)</title>", content, re.IGNORECASE | re.DOTALL)
-                if match:
-                    return match.group(1).strip()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(timeout)
+                s.connect((ip, port))
+                greeting = s.recv(512)
+                if greeting:
+                    text = greeting.decode("utf-8", errors="ignore").strip()
+                    lines = [l.strip() for l in text.splitlines() if l.strip()]
+                    if lines:
+                        clean = "".join(c for c in lines[0] if 32 <= ord(c) < 127).strip()
+                        if clean and len(clean) >= 4:
+                            return clean
         except Exception:
             pass
-        return ""
+
+        # 2. Generic HTTP probe
+        try:
+            url = f"http://{ip}:{port}/"
+            req = urllib.request.Request(url, headers={"User-Agent": "AlienHunter/1.0"}, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                server = resp.headers.get("Server", "").strip()
+                body = resp.read(2048).decode("utf-8", errors="ignore")
+                title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+                title = title_match.group(1).strip() if title_match else ""
+
+                parts = []
+                if server:
+                    parts.append(f"Server: {server}")
+                if title:
+                    parts.append(f"Title: '{title}'")
+                if parts:
+                    return "; ".join(parts)
+        except Exception:
+            pass
+
+        return None
 
     def scan_host(self, ip: str, deep_scan: bool = False) -> Tuple[List[str], List[str], List[str]]:
         """
@@ -92,9 +123,9 @@ class PortScanner:
                 if severity in ("CRITICAL", "HIGH"):
                     threats.append(f"[{severity}] Port {port} ({service}): {description}")
 
-                if port in (80, 8080):
-                    title = self.fetch_web_title(ip, port)
-                    if title:
-                        notes.append(f"Web Title: '{title}'")
+                # Capture service banner on open port
+                banner = self.probe_service_banner(ip, port)
+                if banner:
+                    notes.append(f"Banner ({port}/{service}): {banner}")
 
         return open_ports, threats, notes

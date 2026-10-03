@@ -145,6 +145,8 @@ class AlertMessage:
                 ai = d.ai_assessment
                 lines.append(f"  🤖 *AI Risk:* `{ai.risk_level}` ({ai.device_type})")
                 lines.append(f"  *Summary:* _{ai.summary}_")
+                if getattr(ai, "vulnerabilities", None):
+                    lines.append(f"  🛡️ *Vulnerabilities:* {'; '.join(ai.vulnerabilities[:3])}")
                 lines.append(f"  *Advice:* {ai.action_advice}")
             lines.append(f"  *Status:* {d.status}\n")
 
@@ -208,6 +210,8 @@ class AlertMessage:
             if d.ai_assessment:
                 ai = d.ai_assessment
                 lines.append(f"  AI Risk:          [{ai.risk_level}] {ai.device_type} - {ai.summary}")
+                if getattr(ai, "vulnerabilities", None):
+                    lines.append(f"  Vulnerabilities:  {'; '.join(ai.vulnerabilities[:3])}")
                 lines.append(f"  Advice:           {ai.action_advice}")
             lines.append(f"  Status:           {d.status}\n")
 
@@ -238,6 +242,8 @@ class AlertMessage:
                 ai = d.ai_assessment
                 desc_parts.append(f"**AI Risk:** `{ai.risk_level}` ({ai.device_type})")
                 desc_parts.append(f"**AI Summary:** {ai.summary}")
+                if getattr(ai, "vulnerabilities", None):
+                    desc_parts.append(f"**Vulnerabilities:** {'; '.join(ai.vulnerabilities[:3])}")
                 desc_parts.append(f"**Advice:** {ai.action_advice}")
             desc_parts.append(f"**Status:** {d.status}")
 

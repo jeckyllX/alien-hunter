@@ -283,6 +283,7 @@ class ThreatDetector:
     @staticmethod
     def check_layer2_storms(
         interface: Optional[str] = None,
+        local_mac: Optional[str] = None,
         duration: float = 1.0,
         cam_flood_threshold: int = 30,
         broadcast_storm_threshold: int = 150,
@@ -293,6 +294,7 @@ class ThreatDetector:
         """
         guard = StormGuard(
             interface=interface,
+            local_mac=local_mac,
             cam_flood_threshold=cam_flood_threshold,
             broadcast_storm_threshold=broadcast_storm_threshold,
         )
