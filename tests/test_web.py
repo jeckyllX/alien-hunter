@@ -420,6 +420,61 @@ class TestLightweightWebServer(unittest.TestCase):
         with urlopen(head_req, timeout=3) as res:
             self.assertEqual(res.status, 200)
 
+    def test_post_api_scan_trigger(self):
+        triggered_args = {}
+
+        def mock_scan_trigger(deep=True, ai=True, analyze_all=False):
+            triggered_args["deep"] = deep
+            triggered_args["ai"] = ai
+            triggered_args["analyze_all"] = analyze_all
+            self.state.set_scanning(True)
+
+        setattr(self.web_server.server, "scan_trigger", mock_scan_trigger)
+
+        # Trigger via query params
+        req = Request(
+            f"{self.base_url}/api/scan?deep=true&ai=false",
+            data=b"",
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=3) as res:
+            self.assertEqual(res.status, 200)
+            data = json.loads(res.read().decode("utf-8"))
+            self.assertTrue(data["success"])
+            self.assertTrue(data["deep"])
+            self.assertFalse(data["ai"])
+
+        self.assertEqual(triggered_args["deep"], True)
+        self.assertEqual(triggered_args["ai"], False)
+        self.assertTrue(self.state.is_scanning)
+
+        # Trigger via JSON body
+        req_json = Request(
+            f"{self.base_url}/api/scan",
+            data=json.dumps({"deep": False, "ai": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req_json, timeout=3) as res:
+            self.assertEqual(res.status, 200)
+            data = json.loads(res.read().decode("utf-8"))
+            self.assertTrue(data["success"])
+            self.assertFalse(data["deep"])
+            self.assertTrue(data["ai"])
+
+        self.assertEqual(triggered_args["deep"], False)
+        self.assertEqual(triggered_args["ai"], True)
+
+    def test_dashboard_html_has_deep_scan_button(self):
+        req = Request(f"{self.base_url}/")
+        with urlopen(req, timeout=3) as res:
+            self.assertEqual(res.status, 200)
+            html = res.read().decode("utf-8")
+            self.assertIn('id="btnDeepScan"', html)
+            self.assertIn('triggerManualScan', html)
+            self.assertIn('pollScanProgress', html)
+
     def test_404_not_found(self):
         req = Request(f"{self.base_url}/api/non_existent_endpoint")
         with self.assertRaises(HTTPError) as ctx:

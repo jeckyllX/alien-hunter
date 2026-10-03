@@ -49,6 +49,7 @@ class DeviceRiskAssessment:
     provider: str = "Unknown"
     confidence: str = "HIGH"
     analysis: str = ""
+    vulnerabilities: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -64,6 +65,7 @@ class DeviceRiskAssessment:
             "provider": self.provider,
             "confidence": self.confidence,
             "analysis": self.analysis,
+            "vulnerabilities": self.vulnerabilities,
         }
 
 

@@ -14,7 +14,7 @@ try:
 except ImportError:
     ThreadingHTTPServer = HTTPServer  # type: ignore
 
-from typing import Optional
+from typing import Optional, Any
 from urllib.parse import urlparse, parse_qs
 
 from .state import SentinelState
@@ -120,8 +120,48 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/")
         if path == "/api/whitelist":
             self._handle_whitelist_post()
+        elif path == "/api/scan":
+            self._handle_scan_post(parsed)
         else:
             self._send_json_response(404, {"error": "Not Found"})
+
+    def _handle_scan_post(self, parsed):
+        scan_trigger = getattr(self.server, "scan_trigger", None)
+        if not scan_trigger:
+            self._send_json_response(501, {"success": False, "message": "Manual scan triggering not supported in this mode"})
+            return
+
+        query = parse_qs(parsed.query)
+        deep = query.get("deep", ["true"])[0].lower() in ("true", "1", "yes")
+        ai = query.get("ai", ["true"])[0].lower() in ("true", "1", "yes")
+        analyze_all = query.get("analyze_all", ["false"])[0].lower() in ("true", "1", "yes")
+
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length > 0 and content_length <= 65536:
+                raw_body = self.rfile.read(content_length).decode("utf-8")
+                payload = json.loads(raw_body)
+                if isinstance(payload, dict):
+                    if "deep" in payload:
+                        deep = bool(payload["deep"])
+                    if "ai" in payload:
+                        ai = bool(payload["ai"])
+                    if "analyze_all" in payload:
+                        analyze_all = bool(payload["analyze_all"])
+        except Exception:
+            pass
+
+        try:
+            scan_trigger(deep=deep, ai=ai, analyze_all=analyze_all)
+            self._send_json_response(200, {
+                "success": True,
+                "message": "Manual network audit triggered successfully",
+                "deep": deep,
+                "ai": ai,
+                "analyze_all": analyze_all,
+            })
+        except Exception as e:
+            self._send_json_response(500, {"success": False, "message": f"Failed to trigger scan: {e}"})
 
     def _handle_whitelist_post(self):
         try:
@@ -220,12 +260,14 @@ class LightweightWebServer:
         whitelist_path: Optional[str] = None,
         host: str = "0.0.0.0",
         port: int = 8080,
+        scan_trigger: Optional[Any] = None,
     ):
         self.state = state
         self.config_mgr = config_mgr
         self.whitelist_path = whitelist_path
         self.host = host
         self.port = port
+        self.scan_trigger = scan_trigger
         self.server: Optional[AlienHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -237,6 +279,7 @@ class LightweightWebServer:
             self.server.state = self.state  # type: ignore
             self.server.config_mgr = self.config_mgr  # type: ignore
             self.server.whitelist_path = self.whitelist_path  # type: ignore
+            self.server.scan_trigger = self.scan_trigger  # type: ignore
 
             self.thread = threading.Thread(
                 target=self.server.serve_forever,

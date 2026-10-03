@@ -202,6 +202,35 @@ class TestStormGuard(unittest.TestCase):
         self.guard.stop()
         self.assertFalse(self.guard.is_running)
 
+    def test_local_mac_frames_ignored(self):
+        guard = StormGuard(
+            interface="wlan0",
+            local_mac="DC:A6:32:A2:4F:8E",
+            broadcast_storm_threshold=150,
+        )
+        base_time = 5000.0
+
+        # Simulate 200 raw ARP sweep frames sent by local host
+        for i in range(200):
+            frame = build_ethernet_frame("FF:FF:FF:FF:FF:FF", "DC:A6:32:A2:4F:8E")
+            res = guard.process_frame(frame, now=base_time + (i * 0.001))
+            self.assertIsNone(res)
+
+        self.assertEqual(len(guard.get_threat_strings()), 0)
+        telemetry = guard.get_telemetry(now=base_time + 0.5)
+        self.assertEqual(telemetry["total_frames_processed"], 0)
+
+    def test_subsecond_brief_burst_no_storm_alert(self):
+        base_time = 6000.0
+
+        # Simulate brief 15-packet burst over 0.075s from external host
+        for i in range(15):
+            frame = build_ethernet_frame("FF:FF:FF:FF:FF:FF", "AA:BB:CC:DD:EE:01")
+            res = self.guard.process_frame(frame, now=base_time + (i * 0.005))
+            self.assertIsNone(res)
+
+        self.assertEqual(len(self.guard.get_threat_strings()), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

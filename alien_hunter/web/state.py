@@ -22,6 +22,7 @@ class SentinelState:
         self.last_scan_time: float = 0.0
         self.interval: int = interval
         self.is_running: bool = True
+        self.is_scanning: bool = False
         self.active_defenses: Dict[str, Any] = {}
         self.network_info: Dict[str, Any] = {}
         self.trusted_devices: List[Dict[str, Any]] = []
@@ -30,6 +31,10 @@ class SentinelState:
         self.event_mgr = event_manager or EventManager()
         self._logged_threats: Set[str] = set()
         self._known_alien_macs: Set[str] = set()
+
+    def set_scanning(self, scanning: bool = True):
+        with self._lock:
+            self.is_scanning = scanning
 
     def update_audit(
         self,
@@ -40,6 +45,7 @@ class SentinelState:
     ):
         """Updates live inventory, telemetry, and records security timeline events."""
         with self._lock:
+            self.is_scanning = False
             is_subsequent_scan = (self.last_scan_time > 0)
             self.last_scan_time = time.time()
 
@@ -76,6 +82,7 @@ class SentinelState:
 
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             existing_trusted = {d.get("mac", "").upper(): dict(d) for d in self.trusted_devices if d.get("mac")}
+            existing_alien = {d.get("mac", "").upper(): dict(d) for d in self.alien_devices if d.get("mac")}
             seen_trusted_macs = set()
 
             for dev in devices:
@@ -106,6 +113,8 @@ class SentinelState:
                             dev_dict["name"] = prev["friendly_name"]
                         if not dev_dict.get("last_seen") and prev.get("last_seen"):
                             dev_dict["last_seen"] = prev["last_seen"]
+                        if not dev_dict.get("ai_assessment") and prev.get("ai_assessment"):
+                            dev_dict["ai_assessment"] = prev["ai_assessment"]
 
                         # Check for offline -> online transition
                         if is_subsequent_scan and prev_status == "Offline / Asleep" and dev_status in ("Online / Active", "Local Machine"):
@@ -126,6 +135,8 @@ class SentinelState:
                 else:
                     dev_dict["status"] = "Online / Active"
                     dev_dict["last_seen"] = now_iso
+                    if not dev_dict.get("ai_assessment") and mac_upper in existing_alien and existing_alien[mac_upper].get("ai_assessment"):
+                        dev_dict["ai_assessment"] = existing_alien[mac_upper]["ai_assessment"]
                     alien.append(dev_dict)
 
                     # Log newly detected alien host
@@ -319,6 +330,7 @@ class SentinelState:
 
             return {
                 "is_running": self.is_running,
+                "is_scanning": self.is_scanning,
                 "uptime_seconds": uptime_seconds,
                 "uptime_human": self._format_uptime(uptime_seconds),
                 "last_scan_time": self.last_scan_time,
@@ -389,6 +401,11 @@ class SentinelState:
             "aliases": getattr(dev, "aliases", []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
             "last_seen": getattr(dev, "last_seen", None) or None,
+            "ai_assessment": (
+                getattr(dev, "ai_assessment").to_dict()
+                if getattr(dev, "ai_assessment", None) and hasattr(getattr(dev, "ai_assessment"), "to_dict")
+                else None
+            ),
         }
 
     @staticmethod

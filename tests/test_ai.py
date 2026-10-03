@@ -163,11 +163,45 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(assessment.device_type, "Smartphone")
         self.assertEqual(assessment.analysis, "Ephemeral MAC with stealth port profile matches mobile OS privacy.")
 
+    def test_parse_response_with_vulnerabilities(self):
+        srv = Device(
+            ip="192.168.1.50",
+            mac="00:11:22:33:44:55",
+            notes=["Banner (21/FTP): ProFTPD 1.3.5 Server"],
+        )
+        raw_json = (
+            '{"analysis": "Legacy FTP daemon exposed with known remote command execution.", '
+            '"device_type": "Network Server", "risk_level": "CRITICAL", '
+            '"summary": "Exposed vulnerable ProFTPD daemon.", '
+            '"whitelist_recommendation": "BLOCK", "action_advice": "Disable FTP or upgrade immediately.", '
+            '"vulnerabilities": ["CVE-2015-3306: ProFTPD mod_copy Remote Command Execution"]}'
+        )
+        assessment = self.provider._parse_response_json(raw_json, device=srv)
+        self.assertIsNotNone(assessment)
+        self.assertEqual(assessment.risk_level, "CRITICAL")
+        self.assertEqual(len(assessment.vulnerabilities), 1)
+        self.assertIn("CVE-2015-3306", assessment.vulnerabilities[0])
+
+    def test_device_risk_assessment_to_dict_includes_vulnerabilities(self):
+        assessment = DeviceRiskAssessment(
+            risk_level="HIGH",
+            device_type="NAS / File Server",
+            summary="Vulnerable service detected",
+            whitelist_recommendation="INVESTIGATE",
+            action_advice="Patch firmware",
+            vulnerabilities=["CVE-2023-48795 Terrapin Attack"],
+        )
+        d = assessment.to_dict()
+        self.assertIn("vulnerabilities", d)
+        self.assertEqual(d["vulnerabilities"], ["CVE-2023-48795 Terrapin Attack"])
+
     def test_prompts_structure(self):
         sys_prompt = self.provider.build_system_prompt()
         self.assertIn("Reference Audit Exemplars", sys_prompt)
         self.assertIn("Hardware Taxonomy", sys_prompt)
         self.assertIn('"analysis":', sys_prompt)
+        self.assertIn('"vulnerabilities":', sys_prompt)
+        self.assertIn("Vulnerability Evaluation", sys_prompt)
 
         dev = Device(
             ip="192.168.1.114",

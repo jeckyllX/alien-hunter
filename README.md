@@ -338,6 +338,13 @@ python3 alien_hunter.py --test-ai --ai-provider openrouter
 python3 alien_hunter.py --test-ai --ai-provider ollama
 ```
 
+#### Service Banner & Exposure Analysis
+
+When port inspection runs, Alien Hunter executes protocol-agnostic banner extraction on open ports:
+- Listens for spontaneous service greetings on initial TCP connection (SSH, FTP, SMTP, Telnet).
+- Falls back to generic HTTP probes extracting `Server` response headers and HTML `<title>` tags.
+- The active AI provider evaluates captured banners against known vulnerability profiles and CVE patterns, emitting structured vulnerability lists (`vulnerabilities`) displayed across the CLI, webhook alerts, and Web UI device telemetry modal.
+
 ---
 
 ## Systemd Service

@@ -10,6 +10,7 @@ from alien_hunter.scanners.sniffer import PassiveFrameSniffer
 from alien_hunter.scanners.ssdp import SsdpScanner
 from alien_hunter.scanners.netbios import NetbiosScanner
 from alien_hunter.scanners.arp import ArpScanner, NativeArpSweeper
+from alien_hunter.scanners.ports import PortScanner
 from alien_hunter.threats import ThreatDetector
 
 
@@ -294,6 +295,64 @@ class TestArpScanner(unittest.TestCase):
 
         self.assertIn("192.168.1.10", devs)
         self.assertNotIn("192.168.1.112", devs)
+
+
+class TestPortScannerBanner(unittest.TestCase):
+    """Tests protocol-agnostic service banner probing and integration."""
+
+    @patch("socket.socket")
+    def test_probe_service_banner_spontaneous_greeting(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6\r\n"
+        mock_sock.__enter__.return_value = mock_sock
+        mock_socket_cls.return_value = mock_sock
+
+        scanner = PortScanner()
+        banner = scanner.probe_service_banner("192.168.1.50", 22)
+
+        self.assertEqual(banner, "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6")
+
+    @patch("urllib.request.urlopen")
+    @patch("socket.socket")
+    def test_probe_service_banner_http_fallback(self, mock_socket_cls, mock_urlopen):
+        # Socket greeting returns empty
+        mock_sock = MagicMock()
+        mock_sock.recv.return_value = b""
+        mock_sock.__enter__.return_value = mock_sock
+        mock_socket_cls.return_value = mock_sock
+
+        # HTTP returns server header and HTML title
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Server": "Apache/2.4.41 (Ubuntu)"}
+        mock_resp.read.return_value = b"<html><head><title>Test Gateway</title></head><body>OK</body></html>"
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        scanner = PortScanner()
+        banner = scanner.probe_service_banner("192.168.1.50", 80)
+
+        self.assertEqual(banner, "Server: Apache/2.4.41 (Ubuntu); Title: 'Test Gateway'")
+
+    @patch("socket.socket")
+    def test_probe_service_banner_connection_failure(self, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_sock.connect.side_effect = ConnectionRefusedError()
+        mock_sock.__enter__.return_value = mock_sock
+        mock_socket_cls.return_value = mock_sock
+
+        scanner = PortScanner()
+        banner = scanner.probe_service_banner("192.168.1.50", 9999)
+
+        self.assertIsNone(banner)
+
+    @patch.object(PortScanner, "check_port", side_effect=lambda ip, port: port == 22)
+    @patch.object(PortScanner, "probe_service_banner", return_value="SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6")
+    def test_scan_host_records_banner_in_notes(self, mock_banner, mock_probe):
+        scanner = PortScanner()
+        open_ports, threats, notes = scanner.scan_host("192.168.1.50", deep_scan=False)
+
+        self.assertIn("22/SSH", open_ports)
+        self.assertTrue(any("Banner (22/SSH): SSH-2.0-OpenSSH_8.9p1" in n for n in notes))
 
 
 if __name__ == "__main__":

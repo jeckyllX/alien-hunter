@@ -576,16 +576,17 @@ class DiscoveryEngine:
                 interface=net_info.interface,
             )
         )
-        # g) Remote Promiscuous Node Anti-Sniff Test (on deep scan)
-        if deep_scan and active_devices:
-            threats.extend(
-                ThreatDetector.check_promiscuous_hosts(
-                    interface=net_info.interface,
-                    local_ip=net_info.local_ip,
-                    local_mac=net_info.local_mac,
-                    target_hosts=active_devices,
+        # g) Remote Promiscuous Node Anti-Sniff Test (on deep scan, wired Ethernet only)
+        if deep_scan and active_devices and net_info.interface:
+            if not net_info.interface.startswith(("wl", "wlan", "wifi", "ath", "ra", "wg", "tun", "tap")):
+                threats.extend(
+                    ThreatDetector.check_promiscuous_hosts(
+                        interface=net_info.interface,
+                        local_ip=net_info.local_ip,
+                        local_mac=net_info.local_mac,
+                        target_hosts=active_devices,
+                    )
                 )
-            )
         # h) Wireless Airspace / Evil Twin AP
         if current_ssid:
             threats.extend(ThreatDetector.check_wifi_threats(current_ssid))

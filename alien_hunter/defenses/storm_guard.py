@@ -66,10 +66,14 @@ class StormGuard:
     PACKET_DROP_MEMBERSHIP = 2
     PACKET_MR_PROMISC = 1
     ETH_P_ALL = 0x0003
+    ARPHRD_ETHER = 1
+    PACKET_OUTGOING = 4
+    PACKET_LOOPBACK = 5
 
     def __init__(
         self,
         interface: Optional[str] = None,
+        local_mac: Optional[str] = None,
         cam_flood_threshold: int = 30,
         broadcast_storm_threshold: int = 150,
         window_seconds: float = 2.0,
@@ -77,6 +81,7 @@ class StormGuard:
         history_maxlen: int = 250,
     ):
         self.interface = interface
+        self.local_mac = local_mac.upper() if local_mac else None
         self.cam_flood_threshold = cam_flood_threshold
         self.broadcast_storm_threshold = broadcast_storm_threshold
         self.window_seconds = window_seconds
@@ -97,6 +102,12 @@ class StormGuard:
         self._event_history: List[StormEvent] = []
         self._last_alert_times: Dict[str, float] = {}
 
+    def update_local_mac(self, local_mac: Optional[str]):
+        """Dynamically updates local host MAC address to exclude local transmissions."""
+        if local_mac:
+            with self._lock:
+                self.local_mac = local_mac.upper()
+
     @property
     def is_running(self) -> bool:
         return self.running
@@ -111,6 +122,11 @@ class StormGuard:
             return None
 
         dst_bytes, src_bytes, ethertype = struct.unpack("!6s6sH", frame[:14])
+
+        # Source MAC cannot be all zeroes or have the multicast bit set (IEEE 802.3 standard)
+        if src_bytes == b"\x00\x00\x00\x00\x00\x00" or bool(src_bytes[0] & 0x01):
+            return None
+
         dst_mac = ":".join(f"{b:02x}" for b in dst_bytes).upper()
         src_mac = ":".join(f"{b:02x}" for b in src_bytes).upper()
 
@@ -135,6 +151,11 @@ class StormGuard:
             return None
 
         _, src_mac, _, is_bcast_mcast = parsed
+
+        # Filter out traffic originating from the local machine itself
+        if self.local_mac and src_mac == self.local_mac:
+            return None
+
         ts = now if now is not None else time.time()
 
         with self._lock:
@@ -175,24 +196,27 @@ class StormGuard:
                     return event
 
             # 2. Evaluate Broadcast / Multicast Storm
+            # Require at least 50 broadcast frames and a minimum 0.5s observation duration
+            # to prevent brief sub-second packet bursts (e.g. ARP sweeps or mDNS lookups) from extrapolating into storms.
             bcast_count = sum(1 for item in self._frame_history if item[2])
-            bcast_pps = bcast_count / duration
+            if bcast_count >= min(50, self.broadcast_storm_threshold) and duration >= 0.5:
+                bcast_pps = bcast_count / duration
 
-            if bcast_pps >= self.broadcast_storm_threshold:
-                last_alert = self._last_alert_times.get("BROADCAST_STORM", 0.0)
-                if ts - last_alert >= self.alert_cooldown:
-                    self._last_alert_times["BROADCAST_STORM"] = ts
-                    event = StormEvent(
-                        threat_type="BROADCAST_STORM",
-                        pps=bcast_pps,
-                        threshold=self.broadcast_storm_threshold,
-                        timestamp=ts,
-                        distinct_mac_count=distinct_count,
-                        duration=duration,
-                    )
-                    self._threat_queue.append(event.to_threat_string())
-                    self._event_history.append(event)
-                    return event
+                if bcast_pps >= self.broadcast_storm_threshold:
+                    last_alert = self._last_alert_times.get("BROADCAST_STORM", 0.0)
+                    if ts - last_alert >= self.alert_cooldown:
+                        self._last_alert_times["BROADCAST_STORM"] = ts
+                        event = StormEvent(
+                            threat_type="BROADCAST_STORM",
+                            pps=bcast_pps,
+                            threshold=self.broadcast_storm_threshold,
+                            timestamp=ts,
+                            distinct_mac_count=distinct_count,
+                            duration=duration,
+                        )
+                        self._threat_queue.append(event.to_threat_string())
+                        self._event_history.append(event)
+                        return event
 
             return None
 
@@ -256,7 +280,15 @@ class StormGuard:
             start_time = time.time()
             while time.time() - start_time < duration:
                 try:
-                    pkt, _ = raw_sock.recvfrom(2048)
+                    pkt, sll = raw_sock.recvfrom(2048)
+                    if isinstance(sll, tuple) and len(sll) >= 4:
+                        ifname, proto, pkttype, hatype = sll[0], sll[1], sll[2], sll[3]
+                        if hatype != self.ARPHRD_ETHER:
+                            continue
+                        if pkttype in (self.PACKET_OUTGOING, self.PACKET_LOOPBACK):
+                            continue
+                        if self.interface and ifname != self.interface:
+                            continue
                     ev = self.process_frame(pkt)
                     if ev:
                         events.append(ev)
@@ -334,7 +366,15 @@ class StormGuard:
             raw_sock.settimeout(0.5)
             while self.running:
                 try:
-                    pkt, _ = raw_sock.recvfrom(2048)
+                    pkt, sll = raw_sock.recvfrom(2048)
+                    if isinstance(sll, tuple) and len(sll) >= 4:
+                        ifname, proto, pkttype, hatype = sll[0], sll[1], sll[2], sll[3]
+                        if hatype != self.ARPHRD_ETHER:
+                            continue
+                        if pkttype in (self.PACKET_OUTGOING, self.PACKET_LOOPBACK):
+                            continue
+                        if self.interface and ifname != self.interface:
+                            continue
                     self.process_frame(pkt)
                 except socket.timeout:
                     continue

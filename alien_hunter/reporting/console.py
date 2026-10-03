@@ -71,9 +71,10 @@ class ConsoleReporter:
             for t in dev.threats:
                 print(f"   {Colors.YELLOW}└─ ⚠️  {t}{Colors.RESET}")
             if dev.ai_assessment:
-
                 ai = dev.ai_assessment
                 print(f"   {Colors.MAGENTA}└─ 🤖 AI Profile: [{ai.risk_level}] {ai.device_type} - {ai.summary}{Colors.RESET}")
+                if getattr(ai, "vulnerabilities", None):
+                    print(f"      {Colors.RED}└─ 🛡️ Vulnerabilities: {'; '.join(ai.vulnerabilities)}{Colors.RESET}")
                 print(f"      {Colors.MAGENTA}Recommendation: {ai.whitelist_recommendation} -> {ai.action_advice}{Colors.RESET}")
 
     @staticmethod
@@ -89,6 +90,8 @@ class ConsoleReporter:
                 if a.ai_assessment:
                     ai = a.ai_assessment
                     print(f"     {Colors.MAGENTA}AI Risk: [{ai.risk_level}] {ai.summary}{Colors.RESET}")
+                    if getattr(ai, "vulnerabilities", None):
+                        print(f"     {Colors.RED}Vulnerabilities: {'; '.join(ai.vulnerabilities)}{Colors.RESET}")
                     print(f"     {Colors.MAGENTA}Action: {ai.whitelist_recommendation} ({ai.action_advice}){Colors.RESET}")
         else:
             print(f"\n{Colors.BOLD}{Colors.GREEN}[✓] All active devices match whitelist.{Colors.RESET}")

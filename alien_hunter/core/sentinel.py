@@ -3,6 +3,7 @@
 Runs continuous periodic audits and dispatches alerts across all configured notification hooks.
 """
 
+import threading
 import time
 from typing import List, Set, Optional, Any
 from ..reporting.console import Colors
@@ -88,6 +89,11 @@ class SentinelWatchdog:
         event_mgr = EventManager(log_path=events_path) if events_path else EventManager()
         self.web_state = SentinelState(interval=interval, event_manager=event_mgr)
         self.web_server: Optional[LightweightWebServer] = None
+        self._scan_trigger = threading.Event()
+        self._force_deep = False
+        self._force_ai = False
+        self._force_analyze_all = False
+        self._audit_lock = threading.Lock()
 
         if self.whitelist_path:
             try:
@@ -95,6 +101,17 @@ class SentinelWatchdog:
                 self.web_state.initialize_from_whitelist(initial_wl)
             except Exception:
                 pass
+
+    def trigger_scan(self, deep: bool = True, ai: bool = True, analyze_all: bool = False) -> bool:
+        """Signals the sentinel loop to immediately execute an on-demand audit."""
+        with self._audit_lock:
+            self._force_deep = deep
+            self._force_ai = ai
+            self._force_analyze_all = analyze_all
+            if self.web_state:
+                self.web_state.set_scanning(True)
+            self._scan_trigger.set()
+            return True
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -112,6 +129,9 @@ class SentinelWatchdog:
                 net_info = self.engine.get_network_info(interface=self.interface)
             except Exception:
                 pass
+
+        if net_info and not self.interface:
+            self.interface = net_info.interface
 
         local_ip = net_info.local_ip if net_info else None
         local_mac = net_info.local_mac if net_info else None
@@ -181,6 +201,7 @@ class SentinelWatchdog:
         if self.storm_guard_enabled:
             self.storm_guard = StormGuard(
                 interface=self.interface,
+                local_mac=local_mac,
                 cam_flood_threshold=self.cam_flood_threshold,
                 broadcast_storm_threshold=self.broadcast_storm_threshold,
             )
@@ -198,6 +219,7 @@ class SentinelWatchdog:
                 whitelist_path=self.whitelist_path,
                 host=self.web_host,
                 port=self.web_port,
+                scan_trigger=self.trigger_scan,
             )
             if self.web_server.start():
                 print(f"{Colors.GREEN}[+] Web Dashboard active at http://{self.web_host}:{self.web_port}{Colors.RESET}")
@@ -228,14 +250,34 @@ class SentinelWatchdog:
         try:
             while True:
                 try:
+                    # Check if an on-demand trigger requested a deep scan or AI
+                    deep_scan = self.deep_scan or self._force_deep
+                    ai_engine = self.ai_engine
+                    if (self._force_ai or self._force_analyze_all) and not ai_engine:
+                        try:
+                            from ..ai.engine import AIEngine
+                            config = self.config_mgr.load_config()
+                            ai_engine = AIEngine.from_config(config)
+                        except Exception:
+                            pass
+
+                    if ai_engine and self._force_analyze_all:
+                        ai_engine.analyze_on = "all_devices"
+
+                    self._force_deep = False
+                    self._force_ai = False
+                    self._force_analyze_all = False
+                    if self.web_state:
+                        self.web_state.set_scanning(True)
+
                     # Reload whitelist dynamically in case user updated it
                     whitelist = self.config_mgr.load_whitelist(self.whitelist_path)
                     result = self.engine.run_audit(
                         whitelist=whitelist,
-                        deep_scan=self.deep_scan,
+                        deep_scan=deep_scan,
                         passive_duration=2,
                         interface=self.interface,
-                        ai_engine=self.ai_engine,
+                        ai_engine=ai_engine,
                     )
                     if self.sync_db:
                         self.config_mgr.sync_device_inventory(
@@ -276,6 +318,8 @@ class SentinelWatchdog:
                                 gateway_ip=result.network.gateway_ip,
                                 gateway_mac=result.network.gateway_mac,
                             )
+                        if self.storm_guard and result.network and result.network.local_mac:
+                            self.storm_guard.update_local_mac(result.network.local_mac)
 
                     # Check for honeypot intrusions
                     honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []
@@ -381,13 +425,17 @@ class SentinelWatchdog:
                             if failed_hooks:
                                 print(f"{Colors.YELLOW}[!] Alerts failed on: {', '.join(failed_hooks)}{Colors.RESET}")
 
-                    time.sleep(self.interval)
+                    self._scan_trigger.wait(self.interval)
+                    self._scan_trigger.clear()
 
                 except KeyboardInterrupt:
                     raise
                 except Exception as e:
+                    if self.web_state:
+                        self.web_state.set_scanning(False)
                     print(f"{Colors.YELLOW}[!] Sentinel audit iteration error: {e}{Colors.RESET}")
-                    time.sleep(self.interval)
+                    self._scan_trigger.wait(self.interval)
+                    self._scan_trigger.clear()
 
         except KeyboardInterrupt:
             print(f"\n{Colors.CYAN}[*] Alien Hunter Sentinel terminated by user.{Colors.RESET}")
