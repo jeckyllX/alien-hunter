@@ -15,6 +15,7 @@ from ..defenses.dhcp_starvation import DhcpStarvationGuard
 from ..defenses.arp_poison import ArpPoisonGuard
 from ..defenses.icmp_redirect import IcmpRedirectGuard
 from ..defenses.rogue_dhcp import RogueDhcpGuard
+from ..defenses.storm_guard import StormGuard
 from ..identifiers.ssdp import SsdpListener
 from ..web.state import SentinelState
 from ..web.server import LightweightWebServer
@@ -43,6 +44,9 @@ class SentinelWatchdog:
         arp_poison_enabled: bool = True,
         icmp_redirect_enabled: bool = True,
         rogue_dhcp_enabled: bool = True,
+        storm_guard_enabled: bool = True,
+        cam_flood_threshold: int = 30,
+        broadcast_storm_threshold: int = 150,
         sync_db: bool = True,
         web_enabled: bool = False,
         web_host: str = "0.0.0.0",
@@ -72,6 +76,10 @@ class SentinelWatchdog:
         self.icmp_guard: Optional[IcmpRedirectGuard] = None
         self.rogue_dhcp_enabled = rogue_dhcp_enabled
         self.rogue_dhcp_guard: Optional[RogueDhcpGuard] = None
+        self.storm_guard_enabled = storm_guard_enabled
+        self.cam_flood_threshold = cam_flood_threshold
+        self.broadcast_storm_threshold = broadcast_storm_threshold
+        self.storm_guard: Optional[StormGuard] = None
         self.ssdp_listener: Optional[SsdpListener] = None
         self.sync_db = sync_db
         self.web_enabled = web_enabled
@@ -170,6 +178,15 @@ class SentinelWatchdog:
             if self.rogue_dhcp_guard.start():
                 print(f"{Colors.GREEN}[+] Rogue DHCP Server & Gateway Hijack Guard active.{Colors.RESET}")
 
+        if self.storm_guard_enabled:
+            self.storm_guard = StormGuard(
+                interface=self.interface,
+                cam_flood_threshold=self.cam_flood_threshold,
+                broadcast_storm_threshold=self.broadcast_storm_threshold,
+            )
+            if self.storm_guard.start():
+                print(f"{Colors.GREEN}[+] Switch CAM Flooding & Broadcast Storm Guard active.{Colors.RESET}")
+
         self.ssdp_listener = SsdpListener(interface_ip=local_ip)
         if self.ssdp_listener.start():
             print(f"{Colors.GREEN}[+] SSDP / UPnP Device Harvester active.{Colors.RESET}")
@@ -204,6 +221,7 @@ class SentinelWatchdog:
                 "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
                 "icmp_redirect": bool(self.icmp_guard),
                 "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
+                "storm_guard": bool(self.storm_guard and self.storm_guard.is_running),
                 "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
             }
 
@@ -301,6 +319,12 @@ class SentinelWatchdog:
                         for rdt in rogue_dhcp_threats:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {rdt}{Colors.RESET}")
 
+                    # Check for Layer-2 storms and switch CAM table flooding
+                    storm_threats = self.storm_guard.get_threat_strings() if self.storm_guard else []
+                    if storm_threats:
+                        for st in storm_threats:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {st}{Colors.RESET}")
+
                     combined_threats = (
                         result.threats
                         + honey_threats
@@ -310,6 +334,7 @@ class SentinelWatchdog:
                         + arp_threats
                         + icmp_threats
                         + rogue_dhcp_threats
+                        + storm_threats
                     )
 
                     if self.web_state:
@@ -383,5 +408,9 @@ class SentinelWatchdog:
                 self.arp_guard.stop()
             if self.icmp_guard:
                 self.icmp_guard.stop()
+            if self.rogue_dhcp_guard:
+                self.rogue_dhcp_guard.stop()
+            if self.storm_guard:
+                self.storm_guard.stop()
             if self.ssdp_listener:
                 self.ssdp_listener.stop()

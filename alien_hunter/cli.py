@@ -252,6 +252,10 @@ def main():
         dhcp_starvation_enabled = defenses_cfg.get("dhcp_starvation_enabled", True)
         arp_poison_enabled = defenses_cfg.get("arp_poison_enabled", True)
         icmp_redirect_enabled = defenses_cfg.get("icmp_redirect_enabled", True)
+        rogue_dhcp_enabled = defenses_cfg.get("rogue_dhcp_enabled", True)
+        storm_guard_enabled = defenses_cfg.get("storm_guard_enabled", True)
+        cam_flood_threshold = int(defenses_cfg.get("cam_flood_threshold", 30))
+        broadcast_storm_threshold = int(defenses_cfg.get("broadcast_storm_threshold", 150))
         sentinel = SentinelWatchdog(
             engine=engine,
             notifier=notifier,
@@ -268,6 +272,10 @@ def main():
             dhcp_starvation_enabled=dhcp_starvation_enabled,
             arp_poison_enabled=arp_poison_enabled,
             icmp_redirect_enabled=icmp_redirect_enabled,
+            rogue_dhcp_enabled=rogue_dhcp_enabled,
+            storm_guard_enabled=storm_guard_enabled,
+            cam_flood_threshold=cam_flood_threshold,
+            broadcast_storm_threshold=broadcast_storm_threshold,
             sync_db=should_sync,
             web_enabled=web_enabled,
             web_host=web_host,

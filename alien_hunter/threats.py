@@ -18,6 +18,7 @@ from .defenses.dns_tunneling import DnsTunnelingDetector
 from .defenses.dhcp_starvation import DhcpStarvationGuard
 from .defenses.arp_poison import ArpPoisonGuard
 from .defenses.rogue_dhcp import RogueDhcpGuard
+from .defenses.storm_guard import StormGuard
 
 
 class ThreatDetector:
@@ -275,6 +276,25 @@ class ThreatDetector:
             gateway_mac=gateway_mac,
             trusted_ip_mac_map=trusted_ip_mac_map,
             self_healing_enabled=self_healing,
+        )
+        events = guard.sniff(duration=duration)
+        return [e.to_threat_string() for e in events]
+
+    @staticmethod
+    def check_layer2_storms(
+        interface: Optional[str] = None,
+        duration: float = 1.0,
+        cam_flood_threshold: int = 30,
+        broadcast_storm_threshold: int = 150,
+    ) -> List[str]:
+        """
+        Passively sniffs raw Layer-2 Ethernet frames to detect switch CAM table
+        exhaustion attacks (macof) and broadcast storms.
+        """
+        guard = StormGuard(
+            interface=interface,
+            cam_flood_threshold=cam_flood_threshold,
+            broadcast_storm_threshold=broadcast_storm_threshold,
         )
         events = guard.sniff(duration=duration)
         return [e.to_threat_string() for e in events]

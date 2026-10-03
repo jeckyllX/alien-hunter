@@ -17,7 +17,11 @@
     "syn_scan_enabled": true,
     "dns_tunneling_enabled": true,
     "dhcp_starvation_enabled": true,
-    "arp_poison_enabled": true
+    "arp_poison_enabled": true,
+    "rogue_dhcp_enabled": true,
+    "storm_guard_enabled": true,
+    "cam_flood_threshold": 30,
+    "broadcast_storm_threshold": 150
   },
   "ai_analysis": {
     "enabled": false,

@@ -542,6 +542,7 @@ async function fetchData() {
       { key: 'arp_poison', label: 'ARP Poison Guard' },
       { key: 'arp_self_healing', label: 'ARP Self-Healing IPS' },
       { key: 'icmp_redirect', label: 'ICMP Redirect Guard' },
+      { key: 'storm_guard', label: 'L2 Storm & CAM Guard' },
       { key: 'ssdp_harvester', label: 'SSDP Harvester' }
     ];
     let badgesHtml = '';
