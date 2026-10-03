@@ -49,6 +49,7 @@ Alien Hunter includes a built-in single-page web dashboard and REST API served d
 * **High-Entropy DNS Tunneling Detection:** Analyzes DNS traffic for high Shannon entropy, oversized subdomains, and TXT query anomalies characteristic of C2 tunneling tools (e.g., `iodine`, `dnscat2`). **Operational scope:** This module inspects DNS traffic arriving at or passing through the local interface; it is directly effective when the host running Alien Hunter serves as the local network's DNS resolver or forwarder (such as a Pi-hole, AdGuard Home, or dnsmasq) or when listening on a mirrored/gateway interface. If endpoint devices query an external upstream DNS resolver directly over a switched network, their unicast traffic will not cross the local interface.
 * **DHCP Starvation & Pool Exhaustion Guard:** Passively inspects Layer-2 DHCP traffic to detect rapid bursts of Discover and Request frames with spoofed or mutating hardware MAC addresses attempting pool depletion (e.g., `Yersinia`, `dhcpstarv`).
 * **Real-Time ARP Cache Poisoning & Gateway Guard:** Passively sniffs Layer-2 ARP frames (`EtherType 0x0806`) in real time to detect active gateway impersonation, Ethernet/ARP MAC address forgeries, trusted device IP hijacking, and gratuitous ARP reply floods (e.g., `arpspoof`, `bettercap`, `ettercap`).
+* **Switch CAM Table Flooding & Broadcast Storm Guard:** Passively inspects Layer-2 frame telemetry (`AF_PACKET`) to detect rapid MAC address churn from switch CAM table exhaustion attacks (e.g., `macof`) attempting to force switches into fail-open hub mode, as well as Layer-2 broadcast and multicast loops.
 * **Port Drift Tracking:** Compares open TCP ports against baseline records in `known_devices.json` to flag newly exposed services.
 * **Promiscuous Mode Detection:** Sends non-broadcast unicast ARP probes to identify interfaces operating in promiscuous capture mode.
 * **DHCP Verification:** Probes UDP 67/68 to verify active DHCP servers and detect unauthorized gateway offers.
@@ -106,6 +107,7 @@ alien_hunter/
 │   ├── dns_tunneling.py  # Shannon entropy and DNS exfiltration detector
 │   ├── dhcp_starvation.py # DHCP starvation & pool exhaustion guard
 │   ├── arp_poison.py     # Real-time ARP cache poisoning & gateway guard
+│   ├── storm_guard.py    # Layer-2 broadcast storm & switch CAM table flooding guard
 │   ├── port_drift.py     # Baseline port comparison
 │   └── anti_sniff.py     # Promiscuous interface detection
 ├── scanners/             # Active and passive network discovery modules
@@ -253,7 +255,11 @@ Example schema:
     "syn_scan_enabled": true,
     "dns_tunneling_enabled": true,
     "dhcp_starvation_enabled": true,
-    "arp_poison_enabled": true
+    "arp_poison_enabled": true,
+    "rogue_dhcp_enabled": true,
+    "storm_guard_enabled": true,
+    "cam_flood_threshold": 30,
+    "broadcast_storm_threshold": 150
   },
   "notifications": {
     "telegram": {
