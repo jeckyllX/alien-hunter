@@ -70,13 +70,35 @@ class DeviceRiskAssessment:
 
 
 @dataclass
+class AttackPath:
+    """Represents a potential lateral movement trajectory or attack vector between network nodes."""
+    entry_point: str
+    target: str
+    vector: str
+    severity: str = "MEDIUM"
+    mitigation: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "entry_point": self.entry_point,
+            "target": self.target,
+            "vector": self.vector,
+            "severity": self.severity,
+            "mitigation": self.mitigation,
+        }
+
+
+@dataclass
 class NetworkPostureAssessment:
-    """Encapsulates a deterministic security posture with AI-synthesized executive commentary."""
+    """Encapsulates a deterministic security posture with AI-synthesized topology and lateral movement analysis."""
     posture: NetworkPosture
     summary: str
     threats_found: List[str] = field(default_factory=list)
     hardening_advice: List[str] = field(default_factory=list)
     provider: str = "Unknown"
+    attack_paths: List[AttackPath] = field(default_factory=list)
+    segmentation_risks: List[str] = field(default_factory=list)
+    blast_radius_summary: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -85,4 +107,8 @@ class NetworkPostureAssessment:
             "threats_found": self.threats_found,
             "hardening_advice": self.hardening_advice,
             "provider": self.provider,
+            "attack_paths": [p.to_dict() if hasattr(p, "to_dict") else p for p in self.attack_paths],
+            "segmentation_risks": self.segmentation_risks,
+            "blast_radius_summary": self.blast_radius_summary,
         }
+

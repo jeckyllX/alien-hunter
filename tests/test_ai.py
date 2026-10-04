@@ -244,6 +244,15 @@ class TestAIEngine(unittest.TestCase):
     def test_parse_posture_json(self):
         raw_json = (
             '{"summary": "Network inventory shows 2 unwhitelisted endpoints. No active exploits observed.", '
+            '"blast_radius_summary": "Compromise of IoT node exposes flat /24 subnet workstations.", '
+            '"segmentation_risks": ["Flat /24 subnet without VLAN isolation"], '
+            '"attack_paths": [{'
+            '  "entry_point": "Smart TV (192.0.2.26)", '
+            '  "target": "Workstation-01 (192.0.2.50)", '
+            '  "vector": "Unsegmented layer-2 SMB/RPC lateral probing", '
+            '  "severity": "HIGH", '
+            '  "mitigation": "Isolate Smart TV on Guest Wi-Fi"'
+            '}], '
             '"threats_found": [], "hardening_advice": ["Review new devices"]}'
         )
         posture = self.provider._parse_posture_json(raw_json, posture=NetworkPosture.WARNING)
@@ -251,7 +260,57 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(posture.posture, NetworkPosture.WARNING)
         self.assertIsInstance(posture.posture, NetworkPosture)
         self.assertIn("unwhitelisted", posture.summary)
+        self.assertEqual(posture.blast_radius_summary, "Compromise of IoT node exposes flat /24 subnet workstations.")
+        self.assertEqual(posture.segmentation_risks, ["Flat /24 subnet without VLAN isolation"])
+        self.assertEqual(len(posture.attack_paths), 1)
+        ap = posture.attack_paths[0]
+        self.assertEqual(ap.entry_point, "Smart TV (192.0.2.26)")
+        self.assertEqual(ap.target, "Workstation-01 (192.0.2.50)")
+        self.assertEqual(ap.severity, "HIGH")
+        self.assertEqual(ap.mitigation, "Isolate Smart TV on Guest Wi-Fi")
         self.assertEqual(posture.hardening_advice, ["Review new devices"])
+
+        # Test to_dict serialization
+        d = posture.to_dict()
+        self.assertEqual(d["posture"], "WARNING")
+        self.assertEqual(d["blast_radius_summary"], "Compromise of IoT node exposes flat /24 subnet workstations.")
+        self.assertEqual(len(d["attack_paths"]), 1)
+        self.assertEqual(d["attack_paths"][0]["entry_point"], "Smart TV (192.0.2.26)")
+
+    def test_network_posture_prompt_generation(self):
+        sys_prompt = self.provider.build_network_posture_system_prompt()
+        self.assertIn("Segmentation & Blast Radius", sys_prompt)
+        self.assertIn("Lateral Movement & Attack Paths", sys_prompt)
+        self.assertIn('"blast_radius_summary":', sys_prompt)
+        self.assertIn('"attack_paths":', sys_prompt)
+
+        net_info = NetworkInfo(
+            interface="wlan0",
+            local_ip="192.168.1.10",
+            local_mac="02:00:00:00:00:10",
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:1A:2B:3C:4D:5E",
+            subnet_base="192.168.1",
+        )
+        router = Device(ip="192.168.1.1", mac="00:1A:2B:3C:4D:5E", hostname="router-gw", vendor="Generic Router Corp", open_ports=["80/HTTP", "443/HTTPS", "53/DNS"])
+        tv = Device(ip="192.0.2.26", mac="02:00:00:00:00:26", hostname="SmartTV-LivingRoom", vendor="Generic TV Corp", open_ports=["8008/HTTP"])
+        pc = Device(ip="192.0.2.50", mac="02:00:00:00:00:41", hostname="Workstation-01", vendor="Generic PC Vendor", open_ports=["445/SMB"])
+        alien = Device(ip="192.168.1.200", mac="02:00:00:00:00:99", hostname="UnknownHost", vendor="Tuya", is_alien=True)
+
+        audit = AuditResult(
+            timestamp=0,
+            network=net_info,
+            devices=[router, tv, pc, alien],
+            alien_devices=[alien],
+            threats=[],
+        )
+        user_prompt = self.provider.build_network_posture_user_prompt(audit, "WARNING")
+        self.assertIn("Infrastructure & Gateway Assets", user_prompt)
+        self.assertIn("Sensitive Workstations & High-Value Assets", user_prompt)
+        self.assertIn("IoT, Media & Peripheral Devices", user_prompt)
+        self.assertIn("Unrecognized / Alien Nodes", user_prompt)
+        self.assertIn("SmartTV-LivingRoom", user_prompt)
+        self.assertIn("Workstation-01", user_prompt)
 
     def test_openrouter_provider_initialization(self):
         from alien_hunter.ai.providers.openai_compatible import OpenAICompatibleProvider

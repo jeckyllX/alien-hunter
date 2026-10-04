@@ -223,9 +223,18 @@ class ConfigManager:
                     modified = True
 
             open_ports = getattr(dev, "open_ports", [])
-            if open_ports and entry.get("ports") != open_ports:
-                entry["ports"] = open_ports
-                modified = True
+            if open_ports:
+                def _port_key(p: Any) -> int:
+                    try:
+                        return int(str(p).split("/")[0])
+                    except (ValueError, IndexError):
+                        return 99999
+
+                existing_ports = set(entry.get("ports", []))
+                merged_ports = sorted(list(existing_ports | set(open_ports)), key=_port_key)
+                if merged_ports != entry.get("ports"):
+                    entry["ports"] = merged_ports
+                    modified = True
 
             entry["last_seen"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             modified = True

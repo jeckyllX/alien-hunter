@@ -397,6 +397,7 @@ class SentinelWatchdog:
                                 "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
                                 "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
                             },
+                            ai_posture=result.ai_posture,
                         )
 
                     new_aliens = [

@@ -108,12 +108,40 @@ class ConsoleReporter:
             color = Colors.GREEN if ap.posture == "SECURE" else (Colors.RED if ap.posture == "CRITICAL" else Colors.YELLOW)
             print(f"\n{Colors.BOLD}{color}AI Network Posture: [{ap.posture}]{Colors.RESET}")
             print(f"   {color}{ap.summary}{Colors.RESET}")
+
+            blast = getattr(ap, "blast_radius_summary", "")
+            if blast:
+                print(f"\n   {Colors.BOLD}{Colors.YELLOW}💥 Blast Radius Assessment:{Colors.RESET}")
+                print(f"   {Colors.YELLOW}{blast}{Colors.RESET}")
+
+            seg_risks = getattr(ap, "segmentation_risks", [])
+            if seg_risks:
+                print(f"\n   {Colors.BOLD}{Colors.YELLOW}⚡ Topology & Segmentation Risks:{Colors.RESET}")
+                for sr in seg_risks:
+                    print(f"     • {sr}")
+
+            paths = getattr(ap, "attack_paths", [])
+            if paths:
+                print(f"\n   {Colors.BOLD}{Colors.MAGENTA}🎯 Lateral Movement & Attack Paths:{Colors.RESET}")
+                for p in paths:
+                    sev = getattr(p, "severity", "MEDIUM") if hasattr(p, "severity") else p.get("severity", "MEDIUM")
+                    ep = getattr(p, "entry_point", "") if hasattr(p, "entry_point") else p.get("entry_point", "")
+                    tgt = getattr(p, "target", "") if hasattr(p, "target") else p.get("target", "")
+                    vec = getattr(p, "vector", "") if hasattr(p, "vector") else p.get("vector", "")
+                    mit = getattr(p, "mitigation", "") if hasattr(p, "mitigation") else p.get("mitigation", "")
+                    sev_color = Colors.RED if sev in ("HIGH", "CRITICAL") else Colors.YELLOW
+                    print(f"     {sev_color}[{sev}]{Colors.RESET} {Colors.BOLD}{ep} ➔ {tgt}{Colors.RESET}")
+                    if vec:
+                        print(f"        Vector:     {vec}")
+                    if mit:
+                        print(f"        Mitigation: {mit}")
+
             if ap.threats_found:
-                print(f"   {Colors.YELLOW}Threats Highlighted:{Colors.RESET}")
+                print(f"\n   {Colors.YELLOW}Threats Highlighted:{Colors.RESET}")
                 for tf in ap.threats_found:
                     print(f"     • {tf}")
             if ap.hardening_advice:
-                print(f"   {Colors.CYAN}Hardening Recommendations:{Colors.RESET}")
+                print(f"\n   {Colors.CYAN}Hardening Recommendations:{Colors.RESET}")
                 for ha in ap.hardening_advice:
                     print(f"     ✔ {ha}")
 
