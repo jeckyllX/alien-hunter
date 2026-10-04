@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Dict, Any, Optional, List, Union, Tuple, Set
 
 from .models import (
+    AttackPath,
     DeviceRiskAssessment,
     NetworkPostureAssessment,
     NetworkPosture,
@@ -289,41 +290,111 @@ class BaseAIProvider(ABC):
 
     def build_network_posture_system_prompt(self) -> str:
         return (
-            "You are an expert defensive network security auditor delivering an executive posture assessment for a private LAN audit.\n"
-            "Evaluate aggregate network audit findings objectively and provide concise executive analysis and hardening recommendations.\n\n"
+            "You are an expert defensive network security auditor and threat modeling specialist analyzing a private LAN audit.\n"
+            "Evaluate aggregate network audit findings, topology segmentation, blast radius, and potential lateral movement vectors.\n\n"
             "### Posture Tiers\n"
-            "- 'SECURE': All active devices are verified against authorization baseline with zero threats detected.\n"
-            "- 'WARNING': Unrecognized or unverified alien devices are present, requiring review.\n"
-            "- 'CRITICAL': Active security exploits, spoofing, or severe protocol anomalies detected.\n\n"
+            "- 'SECURE': All active devices are verified against authorization baseline with zero active threats.\n"
+            "- 'WARNING': Unrecognized alien devices or notable segmentation risks present, requiring review.\n"
+            "- 'CRITICAL': Active security exploits, spoofing, or severe service exposures detected.\n\n"
+            "### Scope of Analysis\n"
+            "1. Segmentation & Blast Radius:\n"
+            "   - Identify weaknesses where low-trust or unmanaged devices (Smart TVs, IoT devices, guest phones, alien hosts) share the same unsegmented Layer-2 broadcast domain with sensitive workstations or infrastructure.\n"
+            "   - Evaluate the blast radius if an untrusted or IoT node is compromised.\n"
+            "2. Lateral Movement & Attack Paths:\n"
+            "   - Identify realistic lateral movement attack paths that an adversary with access to a low-trust device could execute against critical assets (e.g., pivot to workstation SMB/RDP, router web administration, DNS hijacking, or unauthenticated UPnP/mDNS).\n"
+            "3. Defensive Mitigation:\n"
+            "   - Provide concrete, prioritized network hardening actions (e.g. guest Wi-Fi isolation, VLAN segmentation, firewall rules).\n\n"
             "### Output Schema\n"
-            "Return strictly valid JSON with this structure:\n"
+            "Return strictly valid JSON with this exact structure:\n"
             "{\n"
-            '  "summary": "<1-2 sentence executive assessment of the network security posture>",\n'
+            '  "summary": "1-2 sentence executive assessment of overall network security posture",\n'
+            '  "blast_radius_summary": "1-2 sentence assessment of blast radius if a low-trust or IoT node is compromised",\n'
+            '  "segmentation_risks": [\n'
+            '    "Specific segmentation risk (e.g. Flat /24 subnet permits IoT devices to probe workstation file shares)"\n'
+            '  ],\n'
+            '  "attack_paths": [\n'
+            '    {\n'
+            '      "entry_point": "<Identified entry or pivot node, e.g. TLC Smart TV (192.168.1.26)>",\n'
+            '      "target": "<Target high-value node, e.g. Acer Biagio (192.168.1.112) or Gateway (192.168.1.1)>",\n'
+            '      "vector": "<Specific lateral movement mechanism, e.g. Layer-2 unsegmented SMB/RPC probe>",\n'
+            '      "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",\n'
+            '      "mitigation": "<Concrete defensive countermeasure, e.g. Isolate Smart TV on Guest Wi-Fi / IoT VLAN>"\n'
+            '    }\n'
+            '  ],\n'
             '  "hardening_advice": [\n'
-            '    "<actionable recommendation 1>",\n'
-            '    "<actionable recommendation 2>"\n'
-            "  ]\n"
+            '    "Actionable network hardening recommendation 1",\n'
+            '    "Actionable network hardening recommendation 2"\n'
+            '  ]\n'
             "}"
         )
 
     def build_network_posture_user_prompt(self, audit: Any, posture: str) -> str:
         threats_str = "\n".join(f"- {t}" for t in audit.threats) if audit.threats else "None detected"
-        dev_sample = []
-        for d in audit.devices[:12]:
+
+        # Categorize devices into security zones
+        infra_devices = []
+        workstations = []
+        iot_devices = []
+        mobile_devices = []
+        alien_devices = []
+        other_devices = []
+
+        gateway_ip = getattr(getattr(audit, "network", None), "gateway_ip", "")
+
+        for d in getattr(audit, "devices", []):
+            hint = self.infer_device_hint(d) or ""
             status = "Alien" if d.is_alien else ("Trusted" if d.trusted else "Unverified")
-            ports = f"Ports: {', '.join(d.open_ports)}" if d.open_ports else "Stealth / Closed Profile"
-            dev_sample.append(f"- {d.display_name} ({d.ip}, {status}, {ports})")
-        dev_text = "\n".join(dev_sample) if dev_sample else "No devices cataloged"
+            ports = f"Ports: {', '.join(d.open_ports)}" if d.open_ports else "Stealth / Closed"
+            notes = f" [{'; '.join(d.notes[:2])}]" if d.notes else ""
+            line = f"- {d.display_name} ({d.ip}, {status}, {ports}{notes})"
+
+            if d.is_alien:
+                alien_devices.append(line)
+            elif d.ip == gateway_ip or "router" in hint.lower() or "appliance" in hint.lower():
+                infra_devices.append(line)
+            elif "workstation" in hint.lower() or "laptop" in hint.lower() or "storage" in hint.lower():
+                workstations.append(line)
+            elif any(k in hint.lower() for k in ("camera", "tv", "iot", "printer", "speaker")):
+                iot_devices.append(line)
+            elif "smartphone" in hint.lower():
+                mobile_devices.append(line)
+            else:
+                other_devices.append(line)
+
+        sections = []
+        if infra_devices:
+            sections.append("#### Infrastructure & Gateway Assets:\n" + "\n".join(infra_devices))
+        if workstations:
+            sections.append("#### Sensitive Workstations & High-Value Assets:\n" + "\n".join(workstations))
+        if iot_devices:
+            sections.append("#### IoT, Media & Peripheral Devices (Potential Pivot Points):\n" + "\n".join(iot_devices))
+        if mobile_devices:
+            sections.append("#### Mobile & Roaming Endpoints:\n" + "\n".join(mobile_devices))
+        if alien_devices:
+            sections.append("#### Unrecognized / Alien Nodes:\n" + "\n".join(alien_devices))
+        if other_devices:
+            sections.append("#### Other Discovered Hosts:\n" + "\n".join(other_devices))
+
+        inventory_text = "\n\n".join(sections) if sections else "No devices cataloged"
+
+        net = getattr(audit, "network", None)
+        subnet_cidr = getattr(net, "subnet_cidr", "192.168.1.0/24")
+        gw_ip = getattr(net, "gateway_ip", "Unknown")
+        gw_mac = getattr(net, "gateway_mac", "Unknown")
+        iface = getattr(net, "interface", "Unknown")
+        loc_ip = getattr(net, "local_ip", "Unknown")
 
         return (
             f"### Network Audit Context\n"
-            f"- Subnet: {audit.network.subnet_cidr}\n"
-            f"- Computed Posture: [{posture}]\n"
-            f"- Inventory: {audit.total_count} total hosts ({audit.trusted_count} trusted, {audit.alien_count} unrecognized aliens)\n"
-            f"- Active Threats: {threats_str}\n\n"
-            f"### Sample Device Inventory\n"
-            f"{dev_text}\n\n"
-            f"Provide the executive assessment JSON matching the output schema."
+            f"- Subnet: {subnet_cidr} (Broadcast Domain: Layer-2 Flat Subnet)\n"
+            f"- Gateway: {gw_ip} ({gw_mac})\n"
+            f"- Auditor Interface: {iface} (Local Host: {loc_ip})\n"
+            f"- Deterministic Posture: [{posture}]\n"
+            f"- Total Cataloged Inventory: {audit.total_count} hosts ({audit.trusted_count} trusted, {audit.alien_count} alien)\n"
+            f"- Active Threats & Anomalies: {threats_str}\n\n"
+            f"### Categorized Network Topology & Inventory\n"
+            f"{inventory_text}\n\n"
+            f"Perform an exhaustive lateral movement and segmentation analysis. Return the structured JSON assessment."
         )
 
     def _parse_posture_json(
@@ -362,12 +433,43 @@ class BaseAIProvider(ABC):
                 else:
                     summary = "Active security threats detected requiring immediate administrator attention."
 
+            attack_paths_raw = data.get("attack_paths", [])
+            attack_paths: List[AttackPath] = []
+            if isinstance(attack_paths_raw, list):
+                for p in attack_paths_raw:
+                    if isinstance(p, dict):
+                        ep = str(p.get("entry_point", "")).strip()
+                        tgt = str(p.get("target", "")).strip()
+                        vec = str(p.get("vector", "")).strip()
+                        sev = str(p.get("severity", "MEDIUM")).upper().strip()
+                        mit = str(p.get("mitigation", "")).strip()
+                        if ep or tgt or vec:
+                            attack_paths.append(
+                                AttackPath(
+                                    entry_point=ep or "Unknown Node",
+                                    target=tgt or "Network Asset",
+                                    vector=vec or "Layer-2 Lateral Access",
+                                    severity=sev if sev in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "MEDIUM",
+                                    mitigation=mit or "Implement network isolation",
+                                )
+                            )
+
+            seg_risks_raw = data.get("segmentation_risks", [])
+            if not isinstance(seg_risks_raw, list):
+                seg_risks_raw = [str(seg_risks_raw)] if seg_risks_raw else []
+            segmentation_risks = [str(r).strip() for r in seg_risks_raw if str(r).strip()]
+
+            blast_radius = str(data.get("blast_radius_summary", "")).strip()
+
             return NetworkPostureAssessment(
                 posture=posture,
                 summary=summary,
                 threats_found=threats or getattr(audit, "threats", []),
                 hardening_advice=advice,
                 provider=self.provider_label,
+                attack_paths=attack_paths,
+                segmentation_risks=segmentation_risks,
+                blast_radius_summary=blast_radius,
             )
         except Exception:
             return None

@@ -299,6 +299,16 @@ def main():
             print(f"{Colors.GREEN}[✔] Network Posture Assessment successful!{Colors.RESET}")
             print(f"    • Network Posture: {posture.posture}")
             print(f"    • Summary:         {posture.summary}")
+            if getattr(posture, "blast_radius_summary", ""):
+                print(f"    • Blast Radius:    {posture.blast_radius_summary}")
+            if getattr(posture, "segmentation_risks", []):
+                print(f"    • Segmentation Risks:")
+                for sr in posture.segmentation_risks:
+                    print(f"        - {sr}")
+            if getattr(posture, "attack_paths", []):
+                print(f"    • Lateral Attack Paths:")
+                for ap in posture.attack_paths:
+                    print(f"        - [{ap.severity}] {ap.entry_point} ➔ {ap.target}: {ap.vector} (Mitigation: {ap.mitigation})")
             if posture.threats_found:
                 print(f"    • Threats:         {', '.join(posture.threats_found)}")
             if posture.hardening_advice:
@@ -471,6 +481,40 @@ def main():
             alien_devices=alien_devices,
             threats=threats,
         )
+
+        ai_posture_raw = status_payload.get("ai_posture") or devices_payload.get("ai_posture")
+        if isinstance(ai_posture_raw, dict):
+            try:
+                from .ai.models import NetworkPostureAssessment, AttackPath, NetworkPosture
+                attack_paths = [
+                    AttackPath(
+                        entry_point=p.get("entry_point", ""),
+                        target=p.get("target", ""),
+                        vector=p.get("vector", ""),
+                        severity=p.get("severity", "MEDIUM"),
+                        mitigation=p.get("mitigation", ""),
+                    )
+                    for p in ai_posture_raw.get("attack_paths", [])
+                    if isinstance(p, dict)
+                ]
+                posture_raw = ai_posture_raw.get("posture", "SECURE")
+                try:
+                    posture_enum = NetworkPosture(posture_raw)
+                except ValueError:
+                    posture_enum = NetworkPosture.SECURE
+
+                result.ai_posture = NetworkPostureAssessment(
+                    posture=posture_enum,
+                    summary=ai_posture_raw.get("summary", ""),
+                    threats_found=ai_posture_raw.get("threats_found", []),
+                    hardening_advice=ai_posture_raw.get("hardening_advice", []),
+                    provider=ai_posture_raw.get("provider", "Unknown"),
+                    attack_paths=attack_paths,
+                    segmentation_risks=ai_posture_raw.get("segmentation_risks", []),
+                    blast_radius_summary=ai_posture_raw.get("blast_radius_summary", ""),
+                )
+            except Exception:
+                pass
 
         if args.json:
             print(json.dumps(result.to_dict(), indent=2))

@@ -28,6 +28,7 @@ class SentinelState:
         self.trusted_devices: List[Dict[str, Any]] = []
         self.alien_devices: List[Dict[str, Any]] = []
         self.recent_threats: List[str] = []
+        self.ai_posture: Optional[Dict[str, Any]] = None
         self.event_mgr = event_manager or EventManager()
         self._logged_threats: Set[str] = set()
         self._known_alien_macs: Set[str] = set()
@@ -42,12 +43,20 @@ class SentinelState:
         threats: List[str],
         network_info: Optional[Any] = None,
         active_defenses: Optional[Dict[str, Any]] = None,
+        ai_posture: Optional[Any] = None,
     ):
         """Updates live inventory, telemetry, and records security timeline events."""
         with self._lock:
             self.is_scanning = False
             is_subsequent_scan = (self.last_scan_time > 0)
             self.last_scan_time = time.time()
+
+            if ai_posture is not None:
+                self.ai_posture = (
+                    ai_posture.to_dict()
+                    if hasattr(ai_posture, "to_dict")
+                    else (dict(ai_posture) if isinstance(ai_posture, dict) else None)
+                )
 
             if network_info:
                 if hasattr(network_info, "__dict__"):
@@ -347,6 +356,7 @@ class SentinelState:
                     "total_events": len(self.event_mgr),
                 },
                 "recent_threats": list(self.recent_threats),
+                "ai_posture": dict(self.ai_posture) if isinstance(self.ai_posture, dict) else None,
             }
 
     def get_devices_payload(self) -> Dict[str, Any]:
@@ -355,6 +365,7 @@ class SentinelState:
             return {
                 "trusted": list(self.trusted_devices),
                 "alien": list(self.alien_devices),
+                "ai_posture": dict(self.ai_posture) if isinstance(self.ai_posture, dict) else None,
             }
 
     def get_events_payload(

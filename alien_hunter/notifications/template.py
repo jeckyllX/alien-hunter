@@ -103,6 +103,18 @@ class AlertMessage:
                 ap = audit.ai_posture
                 lines.append(f"🤖 *AI Network Posture:* `{ap.posture}`")
                 lines.append(f"*Assessment:* _{ap.summary}_")
+                blast = getattr(ap, "blast_radius_summary", "")
+                if blast:
+                    lines.append(f"💥 *Blast Radius:* _{blast}_")
+                paths = getattr(ap, "attack_paths", [])
+                if paths:
+                    lines.append("*🎯 Lateral Movement & Attack Paths:*")
+                    for p in paths[:3]:
+                        sev = getattr(p, "severity", "MEDIUM") if hasattr(p, "severity") else p.get("severity", "MEDIUM")
+                        ep = getattr(p, "entry_point", "") if hasattr(p, "entry_point") else p.get("entry_point", "")
+                        tgt = getattr(p, "target", "") if hasattr(p, "target") else p.get("target", "")
+                        vec = getattr(p, "vector", "") if hasattr(p, "vector") else p.get("vector", "")
+                        lines.append(f"  • `[{sev}]` *{ep}* ➔ *{tgt}*: {vec}")
                 if ap.threats_found:
                     lines.append(f"*Threats:* {', '.join(ap.threats_found)}")
                 if ap.hardening_advice:
@@ -171,6 +183,18 @@ class AlertMessage:
                 ap = audit.ai_posture
                 lines.append(f"AI Network Posture: {ap.posture}")
                 lines.append(f"Assessment: {ap.summary}")
+                blast = getattr(ap, "blast_radius_summary", "")
+                if blast:
+                    lines.append(f"Blast Radius: {blast}")
+                paths = getattr(ap, "attack_paths", [])
+                if paths:
+                    lines.append("Lateral Movement & Attack Paths:")
+                    for p in paths[:3]:
+                        sev = getattr(p, "severity", "MEDIUM") if hasattr(p, "severity") else p.get("severity", "MEDIUM")
+                        ep = getattr(p, "entry_point", "") if hasattr(p, "entry_point") else p.get("entry_point", "")
+                        tgt = getattr(p, "target", "") if hasattr(p, "target") else p.get("target", "")
+                        vec = getattr(p, "vector", "") if hasattr(p, "vector") else p.get("vector", "")
+                        lines.append(f"  - [{sev}] {ep} -> {tgt}: {vec}")
                 if ap.threats_found:
                     lines.append(f"Threats: {', '.join(ap.threats_found)}")
                 if ap.hardening_advice:

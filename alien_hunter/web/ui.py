@@ -251,6 +251,21 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
     <div id="defensesBadges">Loading defensive posture...</div>
   </div>
 
+  <div class="card" id="aiPosturePanel" style="display: none; margin-bottom: 24px;">
+    <div class="section-header" style="margin: 0 0 12px 0;">
+      <div class="section-title" style="display: flex; align-items: center; gap: 8px;">
+        <span>🌐 Network Topology & Lateral Movement Assessment</span>
+        <span class="badge" id="aiPostureBadge">SECURE</span>
+      </div>
+      <span id="aiPostureProvider" style="font-size: 0.75rem; color: var(--text-dim); font-family: monospace;"></span>
+    </div>
+    <div id="aiPostureSummary" style="font-size: 0.95rem; line-height: 1.5; margin-bottom: 12px; color: var(--text-main);"></div>
+    <div id="aiBlastRadius" style="margin-bottom: 12px; padding: 10px 14px; background: rgba(234, 179, 8, 0.08); border-left: 3px solid var(--accent-amber); border-radius: 4px; font-size: 0.85rem; display: none;"></div>
+    <div id="aiSegmentationRisks" style="margin-bottom: 14px; display: none;"></div>
+    <div id="aiAttackPaths" style="display: none;"></div>
+    <div id="aiHardeningAdvice" style="margin-top: 12px; font-size: 0.85rem; display: none;"></div>
+  </div>
+
   <div class="card alien-panel" id="alienPanel" style="display: none;">
     <div class="section-header" style="margin: 0 0 12px 0;">
       <div class="section-title" style="color: var(--accent-red);">
@@ -603,6 +618,10 @@ async function fetchData() {
       threatList.innerHTML = '';
     }
 
+    // AI Network Posture & Topology Assessment
+    const aiPosture = resStatus.ai_posture || resDevices.ai_posture || null;
+    renderAiPosture(aiPosture);
+
     // Devices and Events
     cachedTrusted = Array.isArray(resDevices.trusted) ? resDevices.trusted : [];
     cachedAlien = Array.isArray(resDevices.alien) ? resDevices.alien : [];
@@ -617,6 +636,104 @@ async function fetchData() {
     const pill = document.getElementById('statusPill');
     pill.style.borderColor = 'rgba(239, 68, 68, 0.4)';
     pill.style.color = 'var(--accent-red)';
+  }
+}
+
+function renderAiPosture(posture) {
+  const panel = document.getElementById('aiPosturePanel');
+  if (!panel) return;
+  if (!posture || typeof posture !== 'object' || !posture.summary) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  // Badge
+  const badge = document.getElementById('aiPostureBadge');
+  const post = (posture.posture || 'SECURE').toUpperCase();
+  badge.textContent = post;
+  badge.className = 'badge ' + (post === 'CRITICAL' ? 'badge-red' : (post === 'WARNING' ? 'badge-sev-warn' : 'badge-active'));
+
+  // Provider
+  const provEl = document.getElementById('aiPostureProvider');
+  if (provEl) {
+    provEl.textContent = posture.provider ? `Provider: ${posture.provider}` : '';
+  }
+
+  // Summary
+  const sumEl = document.getElementById('aiPostureSummary');
+  if (sumEl) {
+    sumEl.textContent = posture.summary || '';
+  }
+
+  // Blast Radius
+  const blastEl = document.getElementById('aiBlastRadius');
+  if (blastEl) {
+    if (posture.blast_radius_summary) {
+      blastEl.style.display = 'block';
+      blastEl.innerHTML = `<strong>💥 Blast Radius:</strong> ${escapeHtml(posture.blast_radius_summary)}`;
+    } else {
+      blastEl.style.display = 'none';
+    }
+  }
+
+  // Segmentation Risks
+  const segEl = document.getElementById('aiSegmentationRisks');
+  if (segEl) {
+    const risks = Array.isArray(posture.segmentation_risks) ? posture.segmentation_risks : [];
+    if (risks.length > 0) {
+      segEl.style.display = 'block';
+      segEl.innerHTML = `<div style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; letter-spacing: 0.5px;">⚡ Topology & Segmentation Risks</div>` +
+        `<ul style="margin: 0; padding-left: 20px; font-size: 0.85rem; color: var(--text-main);">${risks.map(r => `<li style="margin-bottom: 4px;">${escapeHtml(r)}</li>`).join('')}</ul>`;
+    } else {
+      segEl.style.display = 'none';
+    }
+  }
+
+  // Attack Paths
+  const pathsEl = document.getElementById('aiAttackPaths');
+  if (pathsEl) {
+    const paths = Array.isArray(posture.attack_paths) ? posture.attack_paths : [];
+    if (paths.length > 0) {
+      pathsEl.style.display = 'block';
+      let pathsHtml = `<div style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; letter-spacing: 0.5px;">🎯 Lateral Movement & Attack Paths</div><div style="display: grid; gap: 8px;">`;
+      paths.forEach(p => {
+        const sev = (p.severity || 'MEDIUM').toUpperCase();
+        const sevClass = sev === 'CRITICAL' ? 'badge-red' : (sev === 'HIGH' ? 'badge-sev-critical' : (sev === 'MEDIUM' ? 'badge-sev-warn' : 'badge-sev-info'));
+        pathsHtml += `
+          <div style="background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+              <div style="font-weight: 600; font-size: 0.9rem; color: var(--text-main);">
+                <span style="color: var(--accent-red);">${escapeHtml(p.entry_point || 'Entry Point')}</span>
+                <span style="color: var(--text-dim); margin: 0 8px;">➔</span>
+                <span style="color: var(--accent-cyan);">${escapeHtml(p.target || 'Target Asset')}</span>
+              </div>
+              <span class="badge ${sevClass}">${sev}</span>
+            </div>
+            <div style="font-size: 0.82rem; color: var(--text-dim); margin-bottom: 4px;">
+              <strong style="color: var(--text-main);">Vector:</strong> ${escapeHtml(p.vector || '')}
+            </div>
+            ${p.mitigation ? `<div style="font-size: 0.82rem; color: var(--accent-green);"><strong style="color: var(--text-main);">Mitigation:</strong> ${escapeHtml(p.mitigation)}</div>` : ''}
+          </div>`;
+      });
+      pathsHtml += `</div>`;
+      pathsEl.innerHTML = pathsHtml;
+    } else {
+      pathsEl.style.display = 'none';
+    }
+  }
+
+  // Hardening Advice
+  const adviceEl = document.getElementById('aiHardeningAdvice');
+  if (adviceEl) {
+    const advice = Array.isArray(posture.hardening_advice) ? posture.hardening_advice : [];
+    if (advice.length > 0) {
+      adviceEl.style.display = 'block';
+      adviceEl.innerHTML = `<div style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-dim); margin-bottom: 6px; letter-spacing: 0.5px;">🛡️ Hardening Recommendations</div>` +
+        `<ul style="margin: 0; padding-left: 20px; color: var(--text-dim);">${advice.map(a => `<li style="margin-bottom: 4px; color: var(--text-main);">${escapeHtml(a)}</li>`).join('')}</ul>`;
+    } else {
+      adviceEl.style.display = 'none';
+    }
   }
 }
 

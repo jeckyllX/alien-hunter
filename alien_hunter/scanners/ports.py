@@ -110,7 +110,7 @@ class PortScanner:
         ports_to_test = (
             SECURITY_PORT_SIGNATURES.keys()
             if deep_scan
-            else [21, 22, 23, 80, 135, 443, 445, 3389, 5357, 5900, 6379, 8080]
+            else [21, 22, 23, 53, 80, 135, 443, 445, 3389, 5357, 5900, 6379, 8080]
         )
 
         for port in ports_to_test:
