@@ -8,6 +8,7 @@ from typing import Dict, List, Any, Optional, Type
 
 from .base import BaseAIProvider
 from .models import DeviceRiskAssessment, NetworkPostureAssessment
+from .posture_gate import PostureDecision, PostureGate, compute_fingerprint
 from .providers.ollama import OllamaProvider
 from .providers.openai_compatible import OpenAICompatibleProvider
 from .providers.anthropic import AnthropicProvider
@@ -36,6 +37,11 @@ class AIEngine:
         self.cache_enabled = bool(self.config.get("cache_results", True))
         self.analyze_on = str(self.config.get("analyze_on", "alien_only")).lower().strip()
         self._cache: Dict[str, DeviceRiskAssessment] = {}
+        self.posture_gate = PostureGate(
+            min_interval=float(self.config.get("posture_min_interval_seconds", 900)),
+            max_age=float(self.config.get("posture_max_age_seconds", 86400)),
+        )
+        self.last_posture_decision: Optional[PostureDecision] = None
 
     @classmethod
     def register_provider(cls, name: str, provider_cls: Type[BaseAIProvider]):
@@ -110,12 +116,36 @@ class AIEngine:
 
         return results
 
-    def analyze_network(self, audit: Any) -> Optional[NetworkPostureAssessment]:
-        """Performs a holistic security posture assessment on the network environment."""
+    def analyze_network(self, audit: Any, force: bool = False) -> Optional[NetworkPostureAssessment]:
+        """
+        Posture assessment gated by PostureGate: the LLM is only called when
+        security-relevant inputs change (or on ``force``). Otherwise the last
+        successful assessment is reused. Provider failures fall back to a
+        deterministic posture that is never cached.
+        """
         if not audit:
             return None
         try:
-            posture = self.provider.analyze_network_posture(audit)
+            tier = BaseAIProvider.compute_posture(
+                getattr(audit, "threats", []), getattr(audit, "alien_count", 0)
+            )
+            fingerprint = compute_fingerprint(audit, tier, BaseAIProvider.infer_device_hint)
+            decision = self.posture_gate.decide(fingerprint, tier, force=force)
+            self.last_posture_decision = decision
+
+            posture: Optional[NetworkPostureAssessment] = None
+            if decision.refresh:
+                posture = self.provider.analyze_network_posture(audit)
+                if posture:
+                    self.posture_gate.store(fingerprint, tier, posture)
+                else:
+                    self.posture_gate.record_failure()
+                    self.last_posture_decision = PostureDecision(False, f"{decision.reason}_failed")
+            else:
+                posture = self.posture_gate.cached(tier, getattr(audit, "threats", []))
+
+            if posture is None:
+                posture = self.provider.fallback_posture(audit)
             if posture:
                 audit.ai_posture = posture
             return posture

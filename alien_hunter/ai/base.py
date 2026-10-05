@@ -506,12 +506,20 @@ class BaseAIProvider(ABC):
         return self._parse_response_json(raw_text, device=device) if raw_text else None
 
     def analyze_network_posture(self, audit: Any) -> Optional[NetworkPostureAssessment]:
-        """Analyzes the holistic security posture of the network."""
+        """
+        LLM posture analysis. Returns None on transport failure or unparseable
+        output so callers can distinguish a real assessment from a fallback.
+        """
         posture = self.compute_posture(getattr(audit, "threats", []), getattr(audit, "alien_count", 0))
         sys_prompt = self.build_network_posture_system_prompt()
         usr_prompt = self.build_network_posture_user_prompt(audit, posture)
         raw_text = self._generate_content(sys_prompt, usr_prompt, max_tokens=self.max_tokens)
-        if raw_text:
-            return self._parse_posture_json(raw_text, posture=posture, audit=audit)
+        if not raw_text:
+            return None
+        return self._parse_posture_json(raw_text, posture=posture, audit=audit)
+
+    def fallback_posture(self, audit: Any) -> Optional[NetworkPostureAssessment]:
+        """Deterministic posture without an LLM call (used when the provider fails)."""
+        posture = self.compute_posture(getattr(audit, "threats", []), getattr(audit, "alien_count", 0))
         return self._parse_posture_json("{}", posture=posture, audit=audit)
 
