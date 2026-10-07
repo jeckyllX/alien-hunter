@@ -18,6 +18,7 @@ from ..scanners.ssdp import SsdpScanner
 from ..scanners.netbios import NetbiosScanner
 from ..scanners.mdns import MdnsScanner
 from ..scanners.ws_discovery import WsDiscoveryScanner
+from ..scanners.ipv6_discovery import Ipv6DiscoveryScanner
 from ..identifiers.vendor import MacVendorResolver
 from ..identifiers.apple import AppleDeviceIdentifier
 from ..identifiers.signatures import (
@@ -149,9 +150,12 @@ class DiscoveryEngine:
         deep_scan: bool = False,
         mdns_devices: Optional[Dict[str, Dict[str, Any]]] = None,
         ws_devices: Optional[Dict[str, Dict[str, Any]]] = None,
+        ipv6_devices: Optional[Dict[str, str]] = None,
     ) -> Tuple[Device, List[str]]:
         """Correlates multiple discovery signals into an enriched Device object and host threats."""
         mac = active_devices.get(ip)
+        if not mac and ipv6_devices:
+            mac = ipv6_devices.get(ip)
         if not mac and ip == net_info.local_ip:
             mac = net_info.local_mac
         if not mac and ip == net_info.gateway_ip:
@@ -520,6 +524,10 @@ class DiscoveryEngine:
         ws_scanner = WsDiscoveryScanner(net_info.interface)
         ws_devices = ws_scanner.scan(timeout=1.2)
 
+        # 8. Active IPv6 Shadow Network Discovery
+        ipv6_scanner = Ipv6DiscoveryScanner(net_info.interface)
+        ipv6_devices = ipv6_scanner.scan(timeout=1.2)
+
         # Combine all discovered IPs
         all_ips: Set[str] = (
             set(active_devices.keys())
@@ -529,6 +537,7 @@ class DiscoveryEngine:
             | set(mdns_devices.keys())
             | set(ws_devices.keys())
             | set(passive_transmitters.keys())
+            | set(ipv6_devices.keys())
         )
         if net_info.gateway_ip:
             all_ips.add(net_info.gateway_ip)
@@ -659,6 +668,7 @@ class DiscoveryEngine:
                 deep_scan=deep_scan,
                 mdns_devices=mdns_devices,
                 ws_devices=ws_devices,
+                ipv6_devices=ipv6_devices,
             )
             inventory.append(dev_obj)
             if dev_obj.is_alien:
