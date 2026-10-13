@@ -9,6 +9,7 @@ from .netbios import NetbiosScanner
 from .mdns import MdnsScanner
 from .ws_discovery import WsDiscoveryScanner
 from .ipv6_discovery import Ipv6DiscoveryScanner
+from .phantom import PhantomSweeper
 
 __all__ = [
     "ArpScanner",
@@ -20,4 +21,5 @@ __all__ = [
     "MdnsScanner",
     "WsDiscoveryScanner",
     "Ipv6DiscoveryScanner",
+    "PhantomSweeper",
 ]

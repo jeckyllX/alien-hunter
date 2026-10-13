@@ -131,6 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--events-file", type=str, default="", help="Custom path to events.jsonl audit log")
     parser.add_argument("-i", "--interface", type=str, default="", help="Network interface to scan (default: auto-detected)")
     parser.add_argument("--deep", action="store_true", help="Perform deep port and vulnerability scanning on all hosts")
+    parser.add_argument("-p", "--ports", type=str, default="", help="Custom ports or port range to scan (e.g. '80,443', '1-1024')")
     parser.add_argument("--whitelist", action="store_true", help="Interactively add newly detected alien devices to whitelist")
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     parser.add_argument("-w", "--watch", action="store_true", help="Run in continuous sentinel / daemon mode")
@@ -357,6 +358,11 @@ def main():
 
     should_sync = (args.sync_db or config.get("auto_sync_database", True)) and not args.no_sync_db
 
+    custom_ports = None
+    if getattr(args, "ports", ""):
+        from .scanners.ports import parse_port_specs
+        custom_ports = parse_port_specs(args.ports)
+
     web_cfg = config.get("web_ui", {})
     web_enabled = bool(args.web or web_cfg.get("enabled", False))
     web_port = args.web_port if args.web_port is not None else int(web_cfg.get("port", 8080))
@@ -407,6 +413,7 @@ def main():
             web_enabled=web_enabled,
             web_host=web_host,
             web_port=web_port,
+            custom_ports=custom_ports,
         )
         sentinel.start()
         return
@@ -556,6 +563,7 @@ def main():
         passive_duration=3,
         interface=selected_interface,
         ai_engine=ai_engine,
+        custom_ports=custom_ports,
     )
 
     # Automatically persist observed metadata (aliases, discovery methods, services, ports) into known_devices.json

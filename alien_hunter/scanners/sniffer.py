@@ -22,9 +22,15 @@ class PassiveFrameSniffer:
     PACKET_DROP_MEMBERSHIP = 2
     PACKET_MR_PROMISC = 1
 
-    def __init__(self, interface: Optional[str] = None, subnet_cidr: Optional[str] = None):
+    def __init__(
+        self,
+        interface: Optional[str] = None,
+        subnet_cidr: Optional[str] = None,
+        gateway_mac: Optional[str] = None,
+    ):
         self.interface = interface
         self.subnet_cidr = subnet_cidr
+        self.gateway_mac = gateway_mac.upper() if gateway_mac else None
         self._local_network = None
         if subnet_cidr:
             try:
@@ -89,8 +95,12 @@ class PassiveFrameSniffer:
 
                                 # Discard transit WAN packets from external internet servers
                                 # forwarded through the gateway. Only catalog hosts on the local link:
+                                is_from_gw = bool(self.gateway_mac and src_mac.upper() == self.gateway_mac)
                                 if self._local_network:
                                     if ip_obj in self._local_network or ip_obj.is_link_local:
+                                        unadvertised[src_ip] = src_mac
+                                    elif ip_obj.is_private and not is_from_gw:
+                                        # Out-of-subnet local transmitter
                                         unadvertised[src_ip] = src_mac
                                 elif ip_obj.is_private or ip_obj.is_link_local:
                                     unadvertised[src_ip] = src_mac

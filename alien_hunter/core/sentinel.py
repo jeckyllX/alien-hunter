@@ -52,12 +52,14 @@ class SentinelWatchdog:
         web_enabled: bool = False,
         web_host: str = "0.0.0.0",
         web_port: int = 8080,
+        custom_ports: Optional[List[int]] = None,
     ):
         self.engine = engine
         self.notifier = notifier
         self.config_mgr = config_mgr
         self.whitelist_path = whitelist_path
         self.events_path = events_path
+        self.custom_ports = custom_ports
         self.interval = interval
         self.deep_scan = deep_scan
         self.interface = interface
@@ -278,6 +280,7 @@ class SentinelWatchdog:
                         passive_duration=2,
                         interface=self.interface,
                         ai_engine=ai_engine,
+                        custom_ports=self.custom_ports,
                     )
                     if self.sync_db:
                         self.config_mgr.sync_device_inventory(
