@@ -19,6 +19,7 @@ from ..scanners.netbios import NetbiosScanner
 from ..scanners.mdns import MdnsScanner
 from ..scanners.ws_discovery import WsDiscoveryScanner
 from ..scanners.ipv6_discovery import Ipv6DiscoveryScanner
+from ..scanners.phantom import PhantomSweeper
 from ..identifiers.vendor import MacVendorResolver
 from ..identifiers.apple import AppleDeviceIdentifier
 from ..identifiers.signatures import (
@@ -151,6 +152,8 @@ class DiscoveryEngine:
         mdns_devices: Optional[Dict[str, Dict[str, Any]]] = None,
         ws_devices: Optional[Dict[str, Dict[str, Any]]] = None,
         ipv6_devices: Optional[Dict[str, str]] = None,
+        custom_ports: Optional[List[int]] = None,
+        phantom_devices: Optional[Dict[str, str]] = None,
     ) -> Tuple[Device, List[str]]:
         """Correlates multiple discovery signals into an enriched Device object and host threats."""
         mac = active_devices.get(ip)
@@ -375,7 +378,7 @@ class DiscoveryEngine:
 
         if status in ("Online / Active", "Local Machine"):
             open_ports, detected_threats, notes_ports = self.port_scanner.scan_host(
-                ip, deep_scan=deep_scan
+                ip, deep_scan=deep_scan, ports=custom_ports
             )
             notes.extend(notes_ports)
             host_threats.extend([f"{ip} ({clean_host}): {t}" for t in detected_threats])
@@ -391,10 +394,16 @@ class DiscoveryEngine:
                 )
                 host_threats.extend(drift_threats)
 
+        # Flag out-of-subnet static host / phantom drop box
+        if PhantomSweeper.is_out_of_subnet(ip, net_info.subnet_cidr) and ip != net_info.gateway_ip and ip != net_info.local_ip:
+            notes.append(f"Mismatched Subnet: Host is operating outside local subnet {net_info.subnet_cidr}")
+
         is_alien = (not is_trusted) and (status == "Online / Active")
 
         # Determine how this device was discovered
         discovery_methods: List[str] = []
+        if phantom_devices and ip in phantom_devices:
+            discovery_methods.append("Phantom Cross-Subnet (Promiscuous Layer-2)")
         if ip in active_devices and ip not in passive_only_ips:
             discovery_methods.append("Layer-2 ARP Scan")
         if ip in passive_only_ips:
@@ -451,6 +460,7 @@ class DiscoveryEngine:
         current_ssid: Optional[str] = None,
         interface: Optional[str] = None,
         ai_engine: Optional[Any] = None,
+        custom_ports: Optional[List[int]] = None,
     ) -> AuditResult:
         """
         Executes a complete multi-layered network audit:
@@ -484,7 +494,11 @@ class DiscoveryEngine:
         dns_leases = router_auditor.audit_subnet(net_info.subnet_base)
 
         # 3. Passive frame sniffer (Hardware Promiscuous Mode)
-        sniffer = PassiveFrameSniffer(net_info.interface, subnet_cidr=net_info.subnet_cidr)
+        sniffer = PassiveFrameSniffer(
+            net_info.interface,
+            subnet_cidr=net_info.subnet_cidr,
+            gateway_mac=net_info.gateway_mac,
+        )
         passive_transmitters = sniffer.sniff(duration=passive_duration)
 
         # Merge passive transmitters into active devices
@@ -528,6 +542,17 @@ class DiscoveryEngine:
         ipv6_scanner = Ipv6DiscoveryScanner(net_info.interface)
         ipv6_devices = ipv6_scanner.scan(timeout=1.2)
 
+        # 9. Active & Passive Phantom Cross-Subnet Discovery
+        phantom_sweeper = PhantomSweeper(
+            interface=net_info.interface,
+            subnet_cidr=net_info.subnet_cidr,
+            gateway_mac=net_info.gateway_mac,
+        )
+        phantom_devices = phantom_sweeper.scan(duration=1.0)
+        for p_ip, p_mac in phantom_devices.items():
+            if p_ip not in active_devices:
+                active_devices[p_ip] = p_mac
+
         # Combine all discovered IPs
         all_ips: Set[str] = (
             set(active_devices.keys())
@@ -538,6 +563,7 @@ class DiscoveryEngine:
             | set(ws_devices.keys())
             | set(passive_transmitters.keys())
             | set(ipv6_devices.keys())
+            | set(phantom_devices.keys())
         )
         if net_info.gateway_ip:
             all_ips.add(net_info.gateway_ip)
@@ -669,11 +695,22 @@ class DiscoveryEngine:
                 mdns_devices=mdns_devices,
                 ws_devices=ws_devices,
                 ipv6_devices=ipv6_devices,
+                custom_ports=custom_ports,
+                phantom_devices=phantom_devices,
             )
             inventory.append(dev_obj)
             if dev_obj.is_alien:
                 alien_devices.append(dev_obj)
             threats.extend(host_threats)
+
+        # Evaluate Out-of-Subnet Phantom Device threats
+        threats.extend(
+            ThreatDetector.check_phantom_devices(
+                devices=inventory,
+                subnet_cidr=net_info.subnet_cidr,
+                gateway_mac=net_info.gateway_mac,
+            )
+        )
 
         audit_result = AuditResult(
 

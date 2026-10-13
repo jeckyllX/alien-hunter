@@ -301,4 +301,37 @@ class ThreatDetector:
         events = guard.sniff(duration=duration)
         return [e.to_threat_string() for e in events]
 
+    @staticmethod
+    def check_phantom_devices(
+        devices: List[Any],
+        subnet_cidr: Optional[str] = None,
+        gateway_mac: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Flags devices operating on foreign or out-of-subnet IP ranges.
+        Detects misconfigured static hosts or stealth drop implants.
+        """
+        threats: List[str] = []
+        if not subnet_cidr:
+            return threats
+
+        from .scanners.phantom import PhantomSweeper
+
+        gw_upper = gateway_mac.upper() if gateway_mac else None
+        for dev in devices:
+            ip = getattr(dev, "ip", "")
+            mac = getattr(dev, "mac", "")
+            if not ip or not mac:
+                continue
+            if gw_upper and mac.upper() == gw_upper:
+                continue
+            if PhantomSweeper.is_out_of_subnet(ip, subnet_cidr):
+                name = getattr(dev, "display_name", ip)
+                threats.append(
+                    f"WARNING: Out-of-Subnet Static Device / Phantom Implant detected! "
+                    f"Host {name} ({ip}) with MAC {mac} is operating outside local subnet {subnet_cidr}."
+                )
+
+        return threats
+
 
