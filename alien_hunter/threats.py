@@ -19,6 +19,8 @@ from .defenses.dhcp_starvation import DhcpStarvationGuard
 from .defenses.arp_poison import ArpPoisonGuard
 from .defenses.rogue_dhcp import RogueDhcpGuard
 from .defenses.storm_guard import StormGuard
+from .defenses.doppelganger import DoppelgangerDetector
+from .scanners.phantom import PhantomSweeper
 
 
 class ThreatDetector:
@@ -315,8 +317,6 @@ class ThreatDetector:
         if not subnet_cidr:
             return threats
 
-        from .scanners.phantom import PhantomSweeper
-
         gw_upper = gateway_mac.upper() if gateway_mac else None
         for dev in devices:
             ip = getattr(dev, "ip", "")
@@ -333,5 +333,44 @@ class ThreatDetector:
                 )
 
         return threats
+
+    @staticmethod
+    def check_device_doppelganger(
+        ip: str,
+        mac: str,
+        display_name: str,
+        observed_ttl: Optional[int] = None,
+        current_os: Optional[str] = None,
+        dhcp_os: Optional[str] = None,
+        whitelist_entry: Optional[Dict[str, Any]] = None,
+        vendor: str = "",
+        update_baseline: bool = True,
+    ) -> List[str]:
+        """
+        Validates live stack parameters against trusted baselines for a single device.
+        Detects MAC address cloning, hardware spoofing, and OS stack masquerading (MITRE ATT&CK T1036).
+        """
+        return DoppelgangerDetector.check_device(
+            ip=ip,
+            mac=mac,
+            display_name=display_name,
+            observed_ttl=observed_ttl,
+            current_os=current_os,
+            dhcp_os=dhcp_os,
+            whitelist_entry=whitelist_entry,
+            vendor=vendor,
+            update_baseline=update_baseline,
+        )
+
+    @staticmethod
+    def check_hardware_doppelgangers(
+        devices: List[Any],
+        whitelist: Dict[str, dict],
+    ) -> List[str]:
+        """
+        Detects MAC address cloning, hardware spoofing, and OS stack masquerading (MITRE ATT&CK T1036)
+        by validating live TCP/IP stack signatures against trusted device baselines.
+        """
+        return DoppelgangerDetector.check_inventory(devices=devices, whitelist=whitelist)
 
 

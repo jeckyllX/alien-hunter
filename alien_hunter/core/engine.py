@@ -302,7 +302,9 @@ class DiscoveryEngine:
 
         # Passive TCP SYN Stack Fingerprint Resolution
         tcp_syn_info = TcpSynFingerprintStore.get_instance().get(ip)
+        observed_ttl = None
         if tcp_syn_info:
+            observed_ttl = tcp_syn_info.get("ttl")
             tcp_match = tcp_syn_info.get("match")
             if not tcp_match:
                 tcp_match = self.signature_manager.match_tcp_syn(
@@ -394,6 +396,20 @@ class DiscoveryEngine:
                 )
                 host_threats.extend(drift_threats)
 
+        # Hardware Doppelgänger & Identity Spoofing Check (MITRE ATT&CK T1036)
+        if mac and not mac.startswith("N/A"):
+            doppel_threats = ThreatDetector.check_device_doppelganger(
+                ip=ip,
+                mac=mac,
+                display_name=friendly_name or clean_host or vendor,
+                observed_ttl=observed_ttl,
+                current_os=tcp_syn_fingerprint,
+                dhcp_os=dhcp_fingerprint,
+                whitelist_entry=whitelist.get(mac),
+                vendor=vendor,
+            )
+            host_threats.extend(doppel_threats)
+
         # Flag out-of-subnet static host / phantom drop box
         if PhantomSweeper.is_out_of_subnet(ip, net_info.subnet_cidr) and ip != net_info.gateway_ip and ip != net_info.local_ip:
             notes.append(f"Mismatched Subnet: Host is operating outside local subnet {net_info.subnet_cidr}")
@@ -447,6 +463,7 @@ class DiscoveryEngine:
             dhcp_params=dhcp_params,
             ssdp_fingerprint=ssdp_fingerprint,
             tcp_syn_fingerprint=tcp_syn_fingerprint,
+            observed_ttl=observed_ttl,
         )
 
         return dev_obj, host_threats

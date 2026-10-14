@@ -5,11 +5,10 @@ operating on the physical Layer-2 broadcast domain with out-of-subnet static IPs
 """
 
 import ipaddress
-import json
 import socket
 import struct
 import time
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional
 
 
 class PhantomSweeper:
@@ -17,6 +16,15 @@ class PhantomSweeper:
     Passively monitors Layer-2 traffic to uncover devices communicating
     from IP subnets different from the primary local subnet.
     """
+
+    SOL_PACKET = getattr(socket, "SOL_PACKET", 263)
+    PACKET_ADD_MEMBERSHIP = 1
+    PACKET_DROP_MEMBERSHIP = 2
+    PACKET_MR_PROMISC = 1
+
+    ETHERTYPE_ARP = 0x0806
+    ETHERTYPE_IPV4 = 0x0800
+    NULL_MAC = "00:00:00:00:00:00"
 
     def __init__(
         self,
@@ -44,7 +52,6 @@ class PhantomSweeper:
             return False
         try:
             ip_obj = ipaddress.ip_address(ip)
-            # Only consider IPv4 unicast addresses
             if ip_obj.version != 4 or ip_obj.is_multicast or ip_obj.is_loopback or ip_obj.is_unspecified:
                 return False
             net_obj = ipaddress.ip_network(subnet_cidr, strict=False)
@@ -63,10 +70,6 @@ class PhantomSweeper:
 
         raw_sock = None
         mreq = None
-        sol_packet = getattr(socket, "SOL_PACKET", 263)
-        packet_mr_promisc = 1
-        packet_add_membership = 1
-        packet_drop_membership = 2
 
         try:
             raw_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
@@ -74,8 +77,8 @@ class PhantomSweeper:
 
             try:
                 ifindex = socket.if_nametoindex(self.interface)
-                mreq = struct.pack("IHH8s", ifindex, packet_mr_promisc, 0, b"")
-                raw_sock.setsockopt(sol_packet, packet_add_membership, mreq)
+                mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
+                raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
             except Exception:
                 mreq = None
 
@@ -89,7 +92,7 @@ class PhantomSweeper:
                         continue
 
                     src_mac = ":".join(f"{b:02X}" for b in pkt[6:12])
-                    if src_mac == "00:00:00:00:00:00":
+                    if src_mac == self.NULL_MAC:
                         continue
 
                     # Filter out frames originating from the default gateway router
@@ -98,14 +101,14 @@ class PhantomSweeper:
 
                     proto = struct.unpack("!H", pkt[12:14])[0]
 
-                    # 1. ARP frames (strictly local broadcast domain)
-                    if proto == 0x0806 and len(pkt) >= 42:
+                    # 1. ARP frames (strictly local Layer-2 broadcast domain)
+                    if proto == self.ETHERTYPE_ARP and len(pkt) >= 42:
                         sender_ip = socket.inet_ntoa(pkt[28:32])
                         if self.is_out_of_subnet(sender_ip, self.subnet_cidr):
                             phantom_devices[sender_ip] = src_mac.upper()
 
                     # 2. IPv4 frames
-                    elif proto == 0x0800 and len(pkt) >= 34:
+                    elif proto == self.ETHERTYPE_IPV4 and len(pkt) >= 34:
                         src_ip = socket.inet_ntoa(pkt[26:30])
                         try:
                             ip_obj = ipaddress.ip_address(src_ip)
@@ -126,7 +129,7 @@ class PhantomSweeper:
             if raw_sock:
                 if mreq:
                     try:
-                        raw_sock.setsockopt(sol_packet, packet_drop_membership, mreq)
+                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
                     except Exception:
                         pass
                 try:

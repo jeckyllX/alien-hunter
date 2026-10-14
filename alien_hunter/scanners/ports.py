@@ -6,80 +6,128 @@ Supports flexible port ranges, multi-tier scanning, banner grabbing, and TLS cer
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import os
 import re
 import socket
 import ssl
 import tempfile
 import urllib.request
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 
+@dataclass(frozen=True)
+class PortServiceDefinition:
+    """Declarative definition of a known network port service and security rating."""
+    port: int
+    service: str
+    severity: str = "INFO"  # INFO, LOW, MEDIUM, HIGH, CRITICAL
+    description: str = ""
+    is_tls: bool = False
+    in_fast_tier: bool = False
+
+
+# Declarative catalog of known security-relevant services
+PORT_SERVICE_CATALOG: Tuple[PortServiceDefinition, ...] = (
+    # Core Remote Access & File Transfer
+    PortServiceDefinition(21, "FTP", "HIGH", "Unencrypted file transfer protocol. Credentials sent in plaintext.", in_fast_tier=True),
+    PortServiceDefinition(22, "SSH", "LOW", "Secure shell service.", in_fast_tier=True),
+    PortServiceDefinition(23, "Telnet", "CRITICAL", "Unencrypted legacy remote shell. Vulnerable to interception/tampering.", in_fast_tier=True),
+    PortServiceDefinition(25, "SMTP", "MEDIUM", "Simple Mail Transfer Protocol."),
+    PortServiceDefinition(53, "DNS", "LOW", "Domain Name System.", in_fast_tier=True),
+    PortServiceDefinition(80, "HTTP", "MEDIUM", "Unencrypted web management portal.", in_fast_tier=True),
+    PortServiceDefinition(81, "HTTP-Alt", "MEDIUM", "Alternate HTTP web portal."),
+    PortServiceDefinition(88, "Kerberos", "LOW", "Kerberos authentication agent."),
+    PortServiceDefinition(110, "POP3", "HIGH", "Unencrypted POP3 email retrieval."),
+    PortServiceDefinition(111, "RPCBind", "MEDIUM", "Open ONC RPC portmapper."),
+    PortServiceDefinition(135, "MSRPC", "MEDIUM", "Microsoft Windows RPC endpoint mapper.", in_fast_tier=True),
+    PortServiceDefinition(139, "NetBIOS-SSN", "MEDIUM", "Legacy Windows NetBIOS/SMB file sharing.", in_fast_tier=True),
+    PortServiceDefinition(143, "IMAP", "HIGH", "Unencrypted IMAP email access."),
+    PortServiceDefinition(161, "SNMP", "HIGH", "Simple Network Management Protocol. Check for default community strings."),
+    PortServiceDefinition(389, "LDAP", "MEDIUM", "Lightweight Directory Access Protocol."),
+    PortServiceDefinition(443, "HTTPS", "LOW", "Encrypted web management portal.", is_tls=True, in_fast_tier=True),
+    PortServiceDefinition(445, "SMB", "HIGH", "Direct SMB file sharing. Potential target for remote execution / ransomware.", in_fast_tier=True),
+    PortServiceDefinition(465, "SMTPS", "LOW", "SMTP over TLS.", is_tls=True),
+    PortServiceDefinition(514, "Syslog", "MEDIUM", "Syslog remote logging service."),
+    PortServiceDefinition(515, "LPD", "LOW", "Line Printer Daemon service."),
+    PortServiceDefinition(554, "RTSP", "HIGH", "Real-time streaming protocol. Often used by IP cameras without authentication."),
+    PortServiceDefinition(587, "Submission", "LOW", "Mail submission port over TLS."),
+    PortServiceDefinition(631, "CUPS", "LOW", "Common Unix Printing System."),
+    PortServiceDefinition(636, "LDAPS", "LOW", "Secure LDAP over TLS.", is_tls=True),
+    PortServiceDefinition(873, "rsync", "HIGH", "rsync file synchronization daemon. Verify authentication."),
+    PortServiceDefinition(902, "VMware-ESXi", "LOW", "VMware ESXi management server."),
+    PortServiceDefinition(993, "IMAPS", "LOW", "IMAP over TLS.", is_tls=True),
+    PortServiceDefinition(995, "POP3S", "LOW", "POP3 over TLS.", is_tls=True),
+    PortServiceDefinition(1080, "SOCKS", "MEDIUM", "SOCKS proxy service."),
+    PortServiceDefinition(1194, "OpenVPN", "LOW", "OpenVPN tunnel daemon."),
+    PortServiceDefinition(1433, "MSSQL", "HIGH", "Microsoft SQL Server database exposed."),
+    PortServiceDefinition(1521, "Oracle", "HIGH", "Oracle database listener exposed."),
+    PortServiceDefinition(1723, "PPTP", "HIGH", "Legacy PPTP VPN tunnel. Known cryptographic weaknesses."),
+    PortServiceDefinition(1883, "MQTT", "HIGH", "MQTT IoT message broker. Frequently unauthenticated!"),
+    PortServiceDefinition(2049, "NFS", "HIGH", "Network File System export. Check for unauthorized exports."),
+    PortServiceDefinition(2181, "ZooKeeper", "HIGH", "Apache ZooKeeper coordination service."),
+    PortServiceDefinition(2222, "SSH-Alt", "LOW", "Alternate SSH remote shell port."),
+    PortServiceDefinition(2375, "Docker-API", "CRITICAL", "Unencrypted, unauthenticated Docker REST API. Allows root host escape!"),
+    PortServiceDefinition(2376, "Docker-TLS", "LOW", "Docker daemon over TLS.", is_tls=True),
+    PortServiceDefinition(3000, "WebApp-Alt", "MEDIUM", "Common development web server or Grafana portal."),
+    PortServiceDefinition(3128, "Squid-Proxy", "MEDIUM", "HTTP proxy server."),
+    PortServiceDefinition(3268, "Global-Catalog", "LOW", "Active Directory Global Catalog."),
+    PortServiceDefinition(3306, "MySQL", "HIGH", "Database port exposed to local network."),
+    PortServiceDefinition(3389, "RDP", "HIGH", "Windows Remote Desktop exposed.", in_fast_tier=True),
+    PortServiceDefinition(4369, "Erlang-EPMD", "LOW", "Erlang Port Mapper Daemon."),
+    PortServiceDefinition(5000, "UPnP/Media", "LOW", "UPnP, Docker Registry, or Flask/Python application server.", in_fast_tier=True),
+    PortServiceDefinition(5001, "Synology-HTTP", "LOW", "Synology DSM web portal."),
+    PortServiceDefinition(5060, "SIP", "LOW", "Session Initiation Protocol for VoIP."),
+    PortServiceDefinition(5222, "XMPP", "LOW", "XMPP instant messaging service."),
+    PortServiceDefinition(5357, "WSDAPI", "LOW", "Windows Web Services on Devices (WSDAPI).", in_fast_tier=True),
+    PortServiceDefinition(5432, "PostgreSQL", "HIGH", "Database port exposed to local network."),
+    PortServiceDefinition(5672, "RabbitMQ", "MEDIUM", "AMQP message broker."),
+    PortServiceDefinition(5900, "VNC", "HIGH", "Virtual Network Computing (Remote Desktop). Often weak or no auth.", in_fast_tier=True),
+    PortServiceDefinition(5984, "CouchDB", "MEDIUM", "CouchDB database."),
+    PortServiceDefinition(5985, "WinRM-HTTP", "MEDIUM", "Windows Remote Management over HTTP."),
+    PortServiceDefinition(5986, "WinRM-HTTPS", "LOW", "Windows Remote Management over HTTPS.", is_tls=True),
+    PortServiceDefinition(6000, "X11", "HIGH", "X11 Window System display server."),
+    PortServiceDefinition(6379, "Redis", "CRITICAL", "In-memory database. Frequently deployed without passwords!", in_fast_tier=True),
+    PortServiceDefinition(6443, "K8s-API", "HIGH", "Kubernetes secure API server.", is_tls=True),
+    PortServiceDefinition(6667, "IRC", "LOW", "Internet Relay Chat daemon."),
+    PortServiceDefinition(7001, "WebLogic", "HIGH", "Oracle WebLogic application server."),
+    PortServiceDefinition(8000, "HTTP-Dev", "MEDIUM", "Development HTTP service."),
+    PortServiceDefinition(8008, "Google Cast", "LOW", "Chromecast / Google Assistant device."),
+    PortServiceDefinition(8080, "HTTP-Alt", "MEDIUM", "Alternate HTTP web portal.", in_fast_tier=True),
+    PortServiceDefinition(8081, "HTTP-Alt2", "MEDIUM", "Secondary HTTP web service."),
+    PortServiceDefinition(8088, "Hadoop-YARN", "HIGH", "Hadoop YARN ResourceManager portal."),
+    PortServiceDefinition(8123, "HomeAssistant", "LOW", "Home Assistant smart home portal."),
+    PortServiceDefinition(8443, "HTTPS-Alt", "LOW", "Alternate HTTPS web portal.", is_tls=True),
+    PortServiceDefinition(9443, "HTTPS-Alt2", "LOW", "Secondary HTTPS web management portal.", is_tls=True),
+    PortServiceDefinition(8888, "Jupyter/HTTP", "MEDIUM", "Jupyter notebook or alternate web application."),
+    PortServiceDefinition(9000, "Portainer/Sonar", "MEDIUM", "Management dashboard port."),
+    PortServiceDefinition(9042, "Cassandra", "MEDIUM", "Apache Cassandra native protocol."),
+    PortServiceDefinition(9090, "Prometheus", "LOW", "Prometheus metrics dashboard."),
+    PortServiceDefinition(9092, "Kafka", "MEDIUM", "Apache Kafka messaging broker."),
+    PortServiceDefinition(9100, "JetDirect", "MEDIUM", "Raw network printer port."),
+    PortServiceDefinition(9200, "Elasticsearch", "CRITICAL", "Elasticsearch REST API. Frequently unauthenticated!"),
+    PortServiceDefinition(9300, "ES-Node", "MEDIUM", "Elasticsearch node communication port."),
+    PortServiceDefinition(9418, "Git", "LOW", "Git pack transfer service."),
+    PortServiceDefinition(9999, "UrBackup", "LOW", "UrBackup client port."),
+    PortServiceDefinition(10000, "Webmin", "HIGH", "Webmin system administration portal."),
+    PortServiceDefinition(11211, "Memcached", "CRITICAL", "Memcached cache daemon. Prone to unauthenticated dumps/DDoS amplification."),
+    PortServiceDefinition(27017, "MongoDB", "CRITICAL", "NoSQL database. Frequently unauthenticated!"),
+    PortServiceDefinition(50000, "SAP", "MEDIUM", "SAP management interface."),
+)
+
+# Registry index mappings for fast lookup
+PORT_REGISTRY: Dict[int, PortServiceDefinition] = {p.port: p for p in PORT_SERVICE_CATALOG}
+
+# Security threat mapping for backwards compatibility and threat reporting
 SECURITY_PORT_SIGNATURES: Dict[int, Tuple[str, str, str]] = {
-    21: ("FTP", "HIGH", "Unencrypted file transfer protocol. Credentials sent in plaintext."),
-    22: ("SSH", "LOW", "Secure shell service."),
-    23: ("Telnet", "CRITICAL", "Unencrypted legacy remote shell. Vulnerable to interception/tampering."),
-    25: ("SMTP", "MEDIUM", "Simple Mail Transfer Protocol."),
-    53: ("DNS", "LOW", "Domain Name System."),
-    80: ("HTTP", "MEDIUM", "Unencrypted web management portal."),
-    88: ("Kerberos", "LOW", "Kerberos authentication agent."),
-    110: ("POP3", "HIGH", "Unencrypted POP3 email retrieval."),
-    111: ("RPCBind", "MEDIUM", "Open ONC RPC portmapper."),
-    135: ("MSRPC", "MEDIUM", "Microsoft Windows RPC endpoint mapper."),
-    139: ("NetBIOS-SSN", "MEDIUM", "Legacy Windows NetBIOS/SMB file sharing."),
-    143: ("IMAP", "HIGH", "Unencrypted IMAP email access."),
-    161: ("SNMP", "HIGH", "Simple Network Management Protocol. Check for default community strings."),
-    389: ("LDAP", "MEDIUM", "Lightweight Directory Access Protocol."),
-    443: ("HTTPS", "LOW", "Encrypted web management portal."),
-    445: ("SMB", "HIGH", "Direct SMB file sharing. Potential target for remote execution / ransomware."),
-    554: ("RTSP", "HIGH", "Real-time streaming protocol. Often used by IP cameras without authentication."),
-    636: ("LDAPS", "LOW", "Secure LDAP over TLS."),
-    873: ("rsync", "HIGH", "rsync file synchronization daemon. Verify authentication."),
-    1433: ("MSSQL", "HIGH", "Microsoft SQL Server database exposed."),
-    1521: ("Oracle", "HIGH", "Oracle database listener exposed."),
-    1883: ("MQTT", "HIGH", "MQTT IoT message broker. Frequently unauthenticated!"),
-    2049: ("NFS", "HIGH", "Network File System export. Check for unauthorized exports."),
-    2181: ("ZooKeeper", "HIGH", "Apache ZooKeeper coordination service."),
-    2222: ("SSH-Alt", "LOW", "Alternate SSH remote shell port."),
-    2375: ("Docker-API", "CRITICAL", "Unencrypted, unauthenticated Docker REST API. Allows root host escape!"),
-    2376: ("Docker-TLS", "LOW", "Docker daemon over TLS."),
-    3000: ("WebApp-Alt", "MEDIUM", "Common development web server or Grafana portal."),
-    3128: ("Squid-Proxy", "MEDIUM", "HTTP proxy server."),
-    3306: ("MySQL", "HIGH", "Database port exposed to local network."),
-    3389: ("RDP", "HIGH", "Windows Remote Desktop exposed."),
-    5000: ("UPnP/Media", "LOW", "UPnP, Docker Registry, or Flask/Python application server."),
-    5357: ("WSDAPI", "LOW", "Windows Web Services on Devices (WSDAPI)."),
-    5432: ("PostgreSQL", "HIGH", "Database port exposed to local network."),
-    5672: ("RabbitMQ", "MEDIUM", "AMQP message broker."),
-    5900: ("VNC", "HIGH", "Virtual Network Computing (Remote Desktop). Often weak or no auth."),
-    6379: ("Redis", "CRITICAL", "In-memory database. Frequently deployed without passwords!"),
-    6443: ("K8s-API", "HIGH", "Kubernetes secure API server."),
-    8000: ("HTTP-Dev", "MEDIUM", "Development HTTP service."),
-    8008: ("Google Cast", "LOW", "Chromecast / Google Assistant device."),
-    8080: ("HTTP-Alt", "MEDIUM", "Alternate HTTP web portal."),
-    8081: ("HTTP-Alt2", "MEDIUM", "Secondary HTTP web service."),
-    8123: ("HomeAssistant", "LOW", "Home Assistant smart home portal."),
-    8443: ("HTTPS-Alt", "LOW", "Alternate HTTPS web portal."),
-    8888: ("Jupyter/HTTP", "MEDIUM", "Jupyter notebook or alternate web application."),
-    9000: ("Portainer/Sonar", "MEDIUM", "Management dashboard port."),
-    9092: ("Kafka", "MEDIUM", "Apache Kafka messaging broker."),
-    9100: ("JetDirect", "MEDIUM", "Raw network printer port."),
-    9200: ("Elasticsearch", "CRITICAL", "Elasticsearch REST API. Frequently unauthenticated!"),
-    10000: ("Webmin", "HIGH", "Webmin system administration portal."),
-    11211: ("Memcached", "CRITICAL", "Memcached cache daemon. Prone to unauthenticated dumps/DDoS amplification."),
-    27017: ("MongoDB", "CRITICAL", "NoSQL database. Frequently unauthenticated!"),
+    p.port: (p.service, p.severity, p.description)
+    for p in PORT_SERVICE_CATALOG
+    if p.severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 }
 
-FAST_PORTS: List[int] = [
-    21, 22, 23, 53, 80, 135, 139, 443, 445, 3389, 5000, 5357, 5900, 6379, 8080
-]
-
-DEEP_PORTS: List[int] = sorted(list(set(FAST_PORTS) | set(SECURITY_PORT_SIGNATURES.keys()) | {
-    25, 81, 88, 110, 111, 143, 161, 389, 465, 514, 515, 587, 631, 636, 873, 902, 993, 995,
-    1025, 1080, 1194, 1433, 1434, 1521, 1723, 1883, 2049, 2181, 2222, 2375, 2376, 3000, 3128,
-    3268, 3306, 4369, 5001, 5060, 5222, 5432, 5672, 5984, 5985, 5986, 6000, 6443, 6667, 7001,
-    8000, 8008, 8081, 8088, 8123, 8443, 8888, 9000, 9042, 9090, 9092, 9100, 9200, 9300, 9418,
-    9999, 10000, 11211, 27017, 50000
-}))
+# Tiered port lists
+FAST_PORTS: List[int] = sorted([p.port for p in PORT_SERVICE_CATALOG if p.in_fast_tier])
+DEEP_PORTS: List[int] = sorted([p.port for p in PORT_SERVICE_CATALOG])
 
 
 def parse_port_specs(specs: Union[str, Iterable[int], Iterable[str]]) -> List[int]:
@@ -185,11 +233,31 @@ class PortScanner:
 
         return None
 
+    @staticmethod
+    def _parse_decoded_cert(decoded: Dict[str, Any]) -> Optional[str]:
+        """Extracts Common Name (CN) and Subject Alternative Names (SANs) from decoded cert dict."""
+        subject = decoded.get("subject", ())
+        cn = ""
+        for rdn in subject:
+            for key, val in rdn:
+                if key == "commonName":
+                    cn = val
+                    break
+        sans = [entry[1] for entry in decoded.get("subjectAltName", ()) if len(entry) >= 2]
+        parts = []
+        if cn:
+            parts.append(f"CN: {cn}")
+        if sans:
+            sans_preview = ", ".join(sans[:3])
+            parts.append(f"SANs: {sans_preview}")
+        return f"TLS Cert ({'; '.join(parts)})" if parts else None
+
     def probe_tls_certificate(self, ip: str, port: int, timeout: float = 0.8) -> Optional[str]:
         """
         Extracts TLS certificate Common Name (CN) and Subject Alternative Names (SANs)
         using standard library SSL primitives without external dependencies.
         """
+        tmp_path = None
         try:
             pem_cert = ssl.get_server_certificate((ip, port), timeout=timeout)
             if not pem_cert:
@@ -200,35 +268,18 @@ class PortScanner:
                 tf.flush()
                 tmp_path = tf.name
 
-            try:
-                # Use standard library decode cert
-                cert_info = getattr(ssl, "_ssl", None)
-                if cert_info and hasattr(cert_info, "_test_decode_cert"):
-                    decoded = cert_info._test_decode_cert(tmp_path)
-                    subject = decoded.get("subject", ())
-                    cn = ""
-                    for rdn in subject:
-                        for key, val in rdn:
-                            if key == "commonName":
-                                cn = val
-                                break
-                    sans = [entry[1] for entry in decoded.get("subjectAltName", ()) if len(entry) >= 2]
-                    parts = []
-                    if cn:
-                        parts.append(f"CN: {cn}")
-                    if sans:
-                        sans_preview = ", ".join(sans[:3])
-                        parts.append(f"SANs: {sans_preview}")
-                    if parts:
-                        return f"TLS Cert ({'; '.join(parts)})"
-            finally:
-                import os
+            cert_info = getattr(ssl, "_ssl", None)
+            if cert_info and hasattr(cert_info, "_test_decode_cert"):
+                decoded = cert_info._test_decode_cert(tmp_path)
+                return self._parse_decoded_cert(decoded)
+        except Exception:
+            pass
+        finally:
+            if tmp_path:
                 try:
                     os.remove(tmp_path)
                 except Exception:
                     pass
-        except Exception:
-            pass
 
         return None
 
@@ -276,9 +327,13 @@ class PortScanner:
         discovered_open.sort()
 
         for port in discovered_open:
-            # Check signatures or fallback to IANA service resolution
-            if port in SECURITY_PORT_SIGNATURES:
-                service, severity, description = SECURITY_PORT_SIGNATURES[port]
+            # Check catalog or fallback to IANA service resolution
+            descriptor = PORT_REGISTRY.get(port)
+            if descriptor:
+                service = descriptor.service
+                severity = descriptor.severity
+                description = descriptor.description
+                is_tls = descriptor.is_tls
             else:
                 try:
                     service = socket.getservbyport(port, "tcp").upper()
@@ -288,19 +343,20 @@ class PortScanner:
                     service = f"Port-{port}"
                     severity = "INFO"
                     description = "Custom or unregistered TCP service."
+                is_tls = "HTTPS" in service or "SSL" in service or "TLS" in service
 
             open_ports.append(f"{port}/{service}")
 
             if severity in ("CRITICAL", "HIGH"):
                 threats.append(f"[{severity}] Port {port} ({service}): {description}")
 
-            # 1. Capture service banner
+            # 1. Capture service greeting / HTTP banner
             banner = self.probe_service_banner(ip, port)
             if banner:
                 notes.append(f"Banner ({port}/{service}): {banner}")
 
             # 2. Inspect TLS certificate on encrypted or common TLS ports
-            if port in (443, 8443, 6443, 2376, 9443, 993, 995, 465) or "HTTPS" in service:
+            if is_tls:
                 tls_info = self.probe_tls_certificate(ip, port)
                 if tls_info:
                     notes.append(f"{tls_info} [{port}]")

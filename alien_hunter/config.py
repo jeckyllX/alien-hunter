@@ -9,6 +9,8 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 
+from .models import estimate_initial_ttl
+
 
 class ConfigManager:
     """Manages file locations, whitelist persistence, and configuration settings."""
@@ -235,6 +237,19 @@ class ConfigManager:
                 if merged_ports != entry.get("ports"):
                     entry["ports"] = merged_ports
                     modified = True
+
+            # Persist stack baseline metrics for trusted device spoofing detection
+            observed_ttl = getattr(dev, "observed_ttl", None)
+            if observed_ttl and not entry.get("baseline_ttl"):
+                entry["baseline_ttl"] = estimate_initial_ttl(observed_ttl)
+                modified = True
+
+            tcp_fp = getattr(dev, "tcp_syn_fingerprint", None)
+            dhcp_fp = getattr(dev, "dhcp_fingerprint", None)
+            learned_os = tcp_fp or dhcp_fp
+            if learned_os and not entry.get("baseline_os"):
+                entry["baseline_os"] = learned_os
+                modified = True
 
             entry["last_seen"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             modified = True
