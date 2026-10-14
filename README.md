@@ -31,6 +31,9 @@ Alien Hunter includes a built-in single-page web dashboard and REST API served d
 
 ### Network Discovery
 * **Layer-2 ARP Probing:** Emits ARP requests via native `AF_PACKET` raw sockets (with fallback to `arp-scan` and `/proc/net/arp`) to map IP addresses to physical MAC addresses directly at the data link layer.
+* **Phantom Cross-Subnet Sweeping:** Passively captures Layer-2 ARP and IPv4 frames in promiscuous mode to discover static drop implants and stealth devices communicating outside the primary local subnet CIDR.
+* **IPv6 Shadow Network Discovery:** Probes link-local multicast (`ff02::1`) to discover dual-stack devices and unmanaged IPv6 neighbors operating in parallel to IPv4 subnets.
+* **Dynamic Multi-Tier Port Scanning:** Probes open TCP services using tiered scanning (fast 15-port tier, deep 100+ port tier, or custom ranges via `--ports`), dynamic OS IANA service resolution (`/etc/services`), HTTP banner grabbing, and standard library TLS certificate inspection.
 * **Reverse DNS Lookups:** Queries the gateway DNS resolver (`UDP 53`) for PTR records to discover DHCP-assigned hostnames.
 * **Multicast DNS (mDNS):** Queries `224.0.0.251:5353` for service advertisements (AirPlay, Cast, HTTP, etc.).
 * **WS-Discovery:** Probes UDP 3702 (`239.255.255.250`) to locate Windows endpoints and ONVIF-compatible devices.
@@ -41,7 +44,11 @@ Alien Hunter includes a built-in single-page web dashboard and REST API served d
 * **Passive Traffic Sniffing:** Captures Ethernet frames on the local interface to identify unprompted traffic and hosts with out-of-subnet IP addresses.
 
 ### Intrusion Detection & Defenses
+* **Hardware Doppelgänger & Identity Spoofing Detection:** Validates live TCP/IP stack signatures (kernel initial TTL boundaries, TCP window/options, and OS profiles) against trusted baselines in `known_devices.json` to detect MAC address cloning and device masquerading (MITRE ATT&CK T1036).
 * **Name Resolution Poisoning Canary:** Broadcasts canary queries for non-existent hostnames across LLMNR (`UDP 5355`), NetBIOS-NS (`UDP 137`), and mDNS (`UDP 5353`). Any affirmative response detects active poisoners (e.g., Responder, Inveigh).
+* **Rogue DHCP Server & Gateway Canary:** Passively monitors `DHCPOFFER`/`DHCPACK` frames and emits periodic canary discover probes to detect unauthorized DHCP servers attempting gateway diversion (MITRE ATT&CK T1557).
+* **Active ARP Self-Healing:** Automatically broadcasts authoritative gratuitous ARP announcements to neutralize active ARP cache poisoning attacks.
+* **Real-Time ICMP Redirect Route Guard:** Listens on raw ICMP sockets for Type 5 (Redirect) messages to detect Adversary-in-the-Middle route manipulation.
 * **Rogue IPv6 Router Detection:** Monitors `ff02::1` for rogue ICMPv6 Router Advertisements (Type 134) and unauthorized RDNSS assignments (e.g., `mitm6`).
 * **DNS Integrity Verification:** Compares gateway DNS resolution against upstream resolvers (Cloudflare `1.1.1.1`, Quad9 `9.9.9.9`) to identify spoofed private IPs or NXDOMAIN hijacking.
 * **Decoy Honey-Ports & Auth Traps:** Binds non-blocking TCP listeners and service banner emulators (HTTP, FTP, Telnet) to configurable decoy ports (e.g., 2323, 5555, 8888) to detect internal port scans and capture brute-force credentials.
@@ -107,18 +114,24 @@ alien_hunter/
 │   ├── dns_tunneling.py  # Shannon entropy and DNS exfiltration detector
 │   ├── dhcp_starvation.py # DHCP starvation & pool exhaustion guard
 │   ├── arp_poison.py     # Real-time ARP cache poisoning & gateway guard
+│   ├── arp_healing.py    # Active gratuitous ARP self-healing
+│   ├── icmp_redirect.py  # ICMP redirect route manipulation detector
+│   ├── rogue_dhcp.py     # Rogue DHCP server & gateway canary
 │   ├── storm_guard.py    # Layer-2 broadcast storm & switch CAM table flooding guard
+│   ├── doppelganger.py   # Hardware Doppelgänger & MAC spoofing detector
 │   ├── port_drift.py     # Baseline port comparison
 │   └── anti_sniff.py     # Promiscuous interface detection
 ├── scanners/             # Active and passive network discovery modules
 │   ├── arp.py            # Layer-2 ARP sweeper (AF_PACKET raw sockets & fallback)
+│   ├── phantom.py        # Promiscuous cross-subnet static implant sweeper
+│   ├── ipv6_discovery.py # IPv6 shadow network neighbor discovery
 │   ├── mdns.py           # mDNS discovery scanner
 │   ├── ws_discovery.py   # WS-Discovery probe scanner
 │   ├── netbios.py        # NetBIOS Name Service scanner
 │   ├── ssdp.py           # SSDP / UPnP M-SEARCH scanner
 │   ├── router.py         # Gateway DNS PTR lookup
 │   ├── sniffer.py        # Raw socket Ethernet frame sniffer
-│   ├── ports.py          # TCP port scanner and service signatures
+│   ├── ports.py          # Dynamic multi-tier TCP port scanner and service catalog
 │   └── net_utils.py      # Low-level socket creation helpers
 ├── data/
 │   └── signatures.json   # Bundled canonical DHCP and mDNS signature database
@@ -126,6 +139,8 @@ alien_hunter/
 │   ├── apple.py          # Apple device identification and mDNS PTR resolver
 │   ├── vendor.py         # IEEE OUI MAC database lookup and randomization check
 │   ├── signatures.py     # SignatureManager, DhcpFingerprintStore, and matcher
+│   ├── tcp_syn.py        # Passive TCP SYN stack fingerprint parser
+│   ├── ssdp.py           # SSDP / UPnP device description parser & listener
 │   └── sync.py           # Privacy-safe dynamic signature synchronization engine
 ├── ai/                   # AI security analysis adapter
 │   ├── engine.py         # AiAnalysisEngine
@@ -156,6 +171,9 @@ sudo ./alien_hunter.py
 # Deep scan (port inspection and anti-sniff verification)
 sudo ./alien_hunter.py --deep
 
+# Custom ports or port range
+sudo ./alien_hunter.py --ports 80,443,8000-8080
+
 # Interactive whitelisting
 sudo ./alien_hunter.py --whitelist
 
@@ -185,6 +203,7 @@ sudo ./alien_hunter.py --web --web-port 8080
 | Flag | Description |
 | :--- | :--- |
 | `-i, --interface <dev>` | Network interface to scan (default: auto-detected from route table). |
+| `-p, --ports <specs>` | Custom ports or port range to scan (e.g. `80,443`, `1-1024`). |
 | `--deep` | Enables extended port scanning and promiscuous node detection. |
 | `--whitelist` | Interactive prompt to label and trust unrecognized devices. |
 | `-w, --watch` | Runs continuously in daemon mode with honey-port listeners. |
@@ -229,6 +248,8 @@ Example schema:
     "discovery_methods": ["Layer-2 ARP Scan", "mDNS (Multicast DNS)"],
     "services": ["_http._tcp.local"],
     "ports": ["80/HTTP", "443/HTTPS"],
+    "baseline_ttl": 64,
+    "baseline_os": "Linux/OpenWrt",
     "last_seen": "2026-09-20T12:00:00Z"
   }
 }
@@ -258,6 +279,7 @@ Example schema:
     "arp_poison_enabled": true,
     "rogue_dhcp_enabled": true,
     "storm_guard_enabled": true,
+    "doppelganger_enabled": true,
     "cam_flood_threshold": 30,
     "broadcast_storm_threshold": 150
   },
