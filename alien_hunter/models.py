@@ -5,7 +5,33 @@ Defines structured objects representing network interfaces, discovered devices, 
 
 import ipaddress
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 from typing import List, Optional, Dict, Any
+
+
+class StackTtl(int, Enum):
+    """Canonical initial TTL boundaries across operating system kernels."""
+    UNIX = 64        # Linux, Android, macOS, iOS, BSD
+    WINDOWS = 128    # Microsoft Windows Desktop and Server
+    NETWORK = 255    # Cisco IOS, Solaris, specialized network hardware
+
+
+class OsFamily(str, Enum):
+    """Normalized operating system families for stack fingerprint correlation."""
+    WINDOWS = "Windows"
+    APPLE = "Apple"
+    LINUX_IOT = "Linux/IoT"
+    BSD = "BSD"
+    NETWORK = "Network"
+
+
+def estimate_initial_ttl(observed_ttl: int) -> int:
+    """Estimates the initial TTL set by the originating operating system kernel."""
+    if observed_ttl <= StackTtl.UNIX:
+        return StackTtl.UNIX.value
+    elif observed_ttl <= StackTtl.WINDOWS:
+        return StackTtl.WINDOWS.value
+    return StackTtl.NETWORK.value
 
 
 @dataclass
@@ -58,6 +84,7 @@ class Device:
     dhcp_params: Optional[List[int]] = None
     ssdp_fingerprint: Optional[str] = None
     tcp_syn_fingerprint: Optional[str] = None
+    observed_ttl: Optional[int] = None
 
     @property
     def display_name(self) -> str:

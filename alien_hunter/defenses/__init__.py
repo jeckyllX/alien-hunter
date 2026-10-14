@@ -12,6 +12,7 @@ from .syn_scan import SynScanDetector, SynScanEvent
 from .dns_tunneling import DnsTunnelingDetector, DnsTunnelingEvent
 from .icmp_redirect import IcmpRedirectGuard, IcmpRedirectEvent
 from .storm_guard import StormGuard, StormEvent
+from .doppelganger import DoppelgangerDetector
 
 __all__ = [
     "LlmnrCanaryTrap",
@@ -31,4 +32,5 @@ __all__ = [
     "IcmpRedirectEvent",
     "StormGuard",
     "StormEvent",
+    "DoppelgangerDetector",
 ]

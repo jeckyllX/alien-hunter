@@ -71,15 +71,15 @@ class TestPortScannerFlexibility(unittest.TestCase):
         self.assertEqual(sorted(deep_calls), sorted(DEEP_PORTS))
 
     @patch.object(PortScanner, "check_port")
-    @patch("socket.getservbyport", return_value="git")
+    @patch("socket.getservbyport", return_value="customsvc")
     def test_scan_host_dynamic_iana_resolution(self, mock_getserv, mock_check_port):
-        mock_check_port.side_effect = lambda ip, p: p == 9418
+        mock_check_port.side_effect = lambda ip, p: p == 45000
 
         scanner = PortScanner()
-        open_ports, threats, notes = scanner.scan_host("192.168.1.10", ports=[9418])
+        open_ports, threats, notes = scanner.scan_host("192.168.1.10", ports=[45000])
 
-        self.assertEqual(open_ports, ["9418/GIT"])
-        mock_getserv.assert_called_with(9418, "tcp")
+        self.assertEqual(open_ports, ["45000/CUSTOMSVC"])
+        mock_getserv.assert_called_with(45000, "tcp")
 
     @patch("ssl.get_server_certificate", return_value="-----BEGIN CERTIFICATE-----\nMOCK\n-----END CERTIFICATE-----\n")
     def test_probe_tls_certificate_success(self, mock_get_cert):
