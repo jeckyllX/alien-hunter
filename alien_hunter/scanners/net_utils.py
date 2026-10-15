@@ -4,7 +4,28 @@ Provides reusable socket creation, interface binding, and broadcast resolution.
 """
 
 import socket
-from typing import Optional
+from typing import Callable, Optional, TypeVar
+
+from ..logging_setup import get_logger
+
+log = get_logger()
+
+T = TypeVar("T")
+
+
+def safe_execute(action: Callable[[], T], default: T, context: str = "") -> T:
+    """
+    Runs a best-effort action, logging failures at DEBUG and returning ``default``.
+
+    Intended for defensive network operations where a failure (permission denied,
+    interface down, dropped reply) must not abort the scan but should remain
+    observable when the shared logger is set to DEBUG.
+    """
+    try:
+        return action()
+    except Exception as e:
+        log.debug("safe_execute failed%s: %s", f" ({context})" if context else "", e)
+        return default
 
 
 def bind_socket_to_device(sock: socket.socket, interface: Optional[str]) -> bool:
@@ -15,7 +36,8 @@ def bind_socket_to_device(sock: socket.socket, interface: Optional[str]) -> bool
         # SO_BINDTODEVICE = 25 on Linux
         sock.setsockopt(socket.SOL_SOCKET, 25, (interface + "\0").encode("utf-8"))
         return True
-    except Exception:
+    except Exception as e:
+        log.debug("Failed to bind socket to device %s: %s", interface, e)
         return False
 
 
@@ -33,14 +55,14 @@ def create_udp_socket(
         try:
             # SO_REUSEPORT = 15 on Linux
             sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_REUSEPORT", 15), 1)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("SO_REUSEPORT unsupported on this platform: %s", e)
 
     if broadcast:
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Failed to enable SO_BROADCAST: %s", e)
 
     if interface:
         bind_socket_to_device(sock, interface)

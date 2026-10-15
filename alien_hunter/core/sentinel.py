@@ -5,7 +5,9 @@ Runs continuous periodic audits and dispatches alerts across all configured noti
 
 import threading
 import time
-from typing import List, Set, Optional, Any
+from typing import List, Set, Optional, Any, Dict, Tuple
+from ..logging_setup import get_logger
+from ..models import SentinelConfig
 from ..reporting.console import Colors
 from ..notifications.engine import NotificationEngine
 from ..config import ConfigManager
@@ -23,6 +25,8 @@ from ..web.server import LightweightWebServer
 from ..events import EventManager
 from .engine import DiscoveryEngine
 
+log = get_logger()
+
 
 class SentinelWatchdog:
     """Continuously monitors network state and dispatches alerts on new device intrusions."""
@@ -32,64 +36,49 @@ class SentinelWatchdog:
         engine: DiscoveryEngine,
         notifier: NotificationEngine,
         config_mgr: ConfigManager,
-        whitelist_path: Optional[str] = None,
-        events_path: Optional[str] = None,
-        interval: int = 300,
-        deep_scan: bool = False,
-        interface: Optional[str] = None,
+        cfg: Optional[SentinelConfig] = None,
         ai_engine: Optional[Any] = None,
-        honey_ports: Optional[List[int]] = None,
-        syn_scan_enabled: bool = True,
-        dns_tunneling_enabled: bool = True,
-        dhcp_starvation_enabled: bool = True,
-        arp_poison_enabled: bool = True,
-        icmp_redirect_enabled: bool = True,
-        rogue_dhcp_enabled: bool = True,
-        storm_guard_enabled: bool = True,
-        cam_flood_threshold: int = 30,
-        broadcast_storm_threshold: int = 150,
-        sync_db: bool = True,
-        web_enabled: bool = False,
-        web_host: str = "0.0.0.0",
-        web_port: int = 8080,
-        custom_ports: Optional[List[int]] = None,
     ):
+        self.cfg = cfg or SentinelConfig()
         self.engine = engine
         self.notifier = notifier
         self.config_mgr = config_mgr
-        self.whitelist_path = whitelist_path
-        self.events_path = events_path
-        self.custom_ports = custom_ports
-        self.interval = interval
-        self.deep_scan = deep_scan
-        self.interface = interface
         self.ai_engine = ai_engine
+
+        self.whitelist_path = self.cfg.whitelist_path
+        self.events_path = self.cfg.events_path
+        self.custom_ports = self.cfg.custom_ports
+        self.interval = self.cfg.interval
+        self.deep_scan = self.cfg.deep_scan
+        self.interface = self.cfg.interface
+        self.honey_ports = self.cfg.honey_ports
+        self.syn_scan_enabled = self.cfg.syn_scan_enabled
+        self.dns_tunneling_enabled = self.cfg.dns_tunneling_enabled
+        self.dhcp_starvation_enabled = self.cfg.dhcp_starvation_enabled
+        self.arp_poison_enabled = self.cfg.arp_poison_enabled
+        self.icmp_redirect_enabled = self.cfg.icmp_redirect_enabled
+        self.rogue_dhcp_enabled = self.cfg.rogue_dhcp_enabled
+        self.storm_guard_enabled = self.cfg.storm_guard_enabled
+        self.cam_flood_threshold = self.cfg.cam_flood_threshold
+        self.broadcast_storm_threshold = self.cfg.broadcast_storm_threshold
+        self.sync_db = self.cfg.sync_db
+        self.web_enabled = self.cfg.web_enabled
+        self.web_host = self.cfg.web_host
+        self.web_port = self.cfg.web_port
+
         self.known_alien_macs: Set[str] = set()
-        self.honey_ports = honey_ports
         self.honey_listener: Optional[HoneyPortListener] = None
-        self.syn_scan_enabled = syn_scan_enabled
         self.syn_detector: Optional[SynScanDetector] = None
-        self.dns_tunneling_enabled = dns_tunneling_enabled
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
-        self.dhcp_starvation_enabled = dhcp_starvation_enabled
         self.dhcp_guard: Optional[DhcpStarvationGuard] = None
-        self.arp_poison_enabled = arp_poison_enabled
         self.arp_guard: Optional[ArpPoisonGuard] = None
-        self.icmp_redirect_enabled = icmp_redirect_enabled
         self.icmp_guard: Optional[IcmpRedirectGuard] = None
-        self.rogue_dhcp_enabled = rogue_dhcp_enabled
         self.rogue_dhcp_guard: Optional[RogueDhcpGuard] = None
-        self.storm_guard_enabled = storm_guard_enabled
-        self.cam_flood_threshold = cam_flood_threshold
-        self.broadcast_storm_threshold = broadcast_storm_threshold
         self.storm_guard: Optional[StormGuard] = None
         self.ssdp_listener: Optional[SsdpListener] = None
-        self.sync_db = sync_db
-        self.web_enabled = web_enabled
-        self.web_host = web_host
-        self.web_port = web_port
-        event_mgr = EventManager(log_path=events_path) if events_path else EventManager()
-        self.web_state = SentinelState(interval=interval, event_manager=event_mgr)
+
+        event_mgr = EventManager(log_path=self.events_path) if self.events_path else EventManager()
+        self.web_state = SentinelState(interval=self.interval, event_manager=event_mgr)
         self.web_server: Optional[LightweightWebServer] = None
         self._scan_trigger = threading.Event()
         self._force_deep = False
@@ -101,8 +90,44 @@ class SentinelWatchdog:
             try:
                 initial_wl = self.config_mgr.load_whitelist(self.whitelist_path)
                 self.web_state.initialize_from_whitelist(initial_wl)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Failed to initialize web state from whitelist: %s", e)
+
+    def _active_defenses_dict(self) -> Dict[str, Any]:
+        """Snapshot of currently active defense subsystems for the web dashboard."""
+        return {
+            "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
+            "syn_scan": bool(self.syn_detector),
+            "dns_tunneling": bool(self.dns_tunnel_detector),
+            "dhcp_starvation": bool(self.dhcp_guard),
+            "arp_poison": bool(self.arp_guard),
+            "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
+            "icmp_redirect": bool(self.icmp_guard),
+            "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
+            "storm_guard": bool(self.storm_guard and self.storm_guard.is_running),
+            "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
+        }
+
+    def _drain_threats(self) -> Dict[str, List[str]]:
+        """
+        Drains and clears the threat queues of every active defense module.
+
+        Returns a mapping of defense name -> freshly observed threat strings.
+        """
+        drainable: List[Tuple[str, Optional[Any]]] = [
+            ("honey", self.honey_listener),
+            ("syn_scan", self.syn_detector),
+            ("dns_tunneling", self.dns_tunnel_detector),
+            ("dhcp_starvation", self.dhcp_guard),
+            ("arp_poison", self.arp_guard),
+            ("icmp_redirect", self.icmp_guard),
+            ("rogue_dhcp", self.rogue_dhcp_guard),
+            ("storm_guard", self.storm_guard),
+        ]
+        return {
+            name: (module.get_threat_strings() if module else [])
+            for name, module in drainable
+        }
 
     def trigger_scan(self, deep: bool = True, ai: bool = True, analyze_all: bool = False) -> bool:
         """Signals the sentinel loop to immediately execute an on-demand audit."""
@@ -129,8 +154,8 @@ class SentinelWatchdog:
         if self.engine:
             try:
                 net_info = self.engine.get_network_info(interface=self.interface)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Failed to resolve network info at startup: %s", e)
 
         if net_info and not self.interface:
             self.interface = net_info.interface
@@ -235,19 +260,9 @@ class SentinelWatchdog:
                     "gateway_ip": getattr(net_info, "gateway_ip", ""),
                     "gateway_mac": getattr(net_info, "gateway_mac", ""),
                     "subnet_cidr": getattr(net_info, "subnet_cidr", ""),
+                    "prefix_len": getattr(net_info, "prefix_len", None),
                 }
-            self.web_state.active_defenses = {
-                "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
-                "syn_scan": bool(self.syn_detector),
-                "dns_tunneling": bool(self.dns_tunnel_detector),
-                "dhcp_starvation": bool(self.dhcp_guard),
-                "arp_poison": bool(self.arp_guard),
-                "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
-                "icmp_redirect": bool(self.icmp_guard),
-                "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
-                "storm_guard": bool(self.storm_guard and self.storm_guard.is_running),
-                "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
-            }
+            self.web_state.active_defenses = self._active_defenses_dict()
 
         try:
             while True:
@@ -260,8 +275,8 @@ class SentinelWatchdog:
                             from ..ai.engine import AIEngine
                             config = self.config_mgr.load_config()
                             ai_engine = AIEngine.from_config(config)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.debug("On-demand AI engine initialization failed: %s", e)
 
                     if ai_engine and self._force_analyze_all:
                         ai_engine.analyze_on = "all_devices"
@@ -324,82 +339,22 @@ class SentinelWatchdog:
                         if self.storm_guard and result.network and result.network.local_mac:
                             self.storm_guard.update_local_mac(result.network.local_mac)
 
-                    # Check for honeypot intrusions
-                    honey_threats = self.honey_listener.get_threat_strings() if self.honey_listener else []
-                    if honey_threats:
-                        for ht in honey_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {ht}{Colors.RESET}")
+                    # Drain threat queues from every active defense module
+                    threat_groups = self._drain_threats()
+                    for msgs in threat_groups.values():
+                        for msg in msgs:
+                            print(f"{Colors.BOLD}{Colors.RED}[!] {msg}{Colors.RESET}")
 
-                    # Check for stealth SYN port scans
-                    syn_threats = self.syn_detector.get_threat_strings() if self.syn_detector else []
-                    if syn_threats:
-                        for st in syn_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {st}{Colors.RESET}")
-
-                    # Check for high-entropy DNS tunneling & exfiltration
-                    dns_threats = self.dns_tunnel_detector.get_threat_strings() if self.dns_tunnel_detector else []
-                    if dns_threats:
-                        for dt in dns_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {dt}{Colors.RESET}")
-
-                    # Check for DHCP starvation floods
-                    dhcp_threats = self.dhcp_guard.get_threat_strings() if self.dhcp_guard else []
-                    if dhcp_threats:
-                        for dht in dhcp_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {dht}{Colors.RESET}")
-
-                    # Check for real-time ARP cache poisoning
-                    arp_threats = self.arp_guard.get_threat_strings() if self.arp_guard else []
-                    if arp_threats:
-                        for at in arp_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {at}{Colors.RESET}")
-
-                    # Check for real-time ICMP redirect route hijacking
-                    icmp_threats = self.icmp_guard.get_threat_strings() if self.icmp_guard else []
-                    if icmp_threats:
-                        for it in icmp_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {it}{Colors.RESET}")
-
-                    # Check for rogue DHCP servers & gateway hijacking
-                    rogue_dhcp_threats = self.rogue_dhcp_guard.get_threat_strings() if self.rogue_dhcp_guard else []
-                    if rogue_dhcp_threats:
-                        for rdt in rogue_dhcp_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {rdt}{Colors.RESET}")
-
-                    # Check for Layer-2 storms and switch CAM table flooding
-                    storm_threats = self.storm_guard.get_threat_strings() if self.storm_guard else []
-                    if storm_threats:
-                        for st in storm_threats:
-                            print(f"{Colors.BOLD}{Colors.RED}[!] {st}{Colors.RESET}")
-
-                    combined_threats = (
-                        result.threats
-                        + honey_threats
-                        + syn_threats
-                        + dns_threats
-                        + dhcp_threats
-                        + arp_threats
-                        + icmp_threats
-                        + rogue_dhcp_threats
-                        + storm_threats
-                    )
+                    combined_threats = result.threats + [
+                        msg for msgs in threat_groups.values() for msg in msgs
+                    ]
 
                     if self.web_state:
                         self.web_state.update_audit(
                             devices=result.devices,
                             threats=combined_threats,
                             network_info=result.network,
-                            active_defenses={
-                                "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
-                                "syn_scan": bool(self.syn_detector),
-                                "dns_tunneling": bool(self.dns_tunnel_detector),
-                                "dhcp_starvation": bool(self.dhcp_guard),
-                                "arp_poison": bool(self.arp_guard),
-                                "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
-                                "icmp_redirect": bool(self.icmp_guard),
-                                "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
-                                "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
-                            },
+                            active_defenses=self._active_defenses_dict(),
                             ai_posture=result.ai_posture,
                         )
 
@@ -407,7 +362,8 @@ class SentinelWatchdog:
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    if new_aliens or honey_threats or syn_threats or dns_threats or dhcp_threats or arp_threats or icmp_threats or rogue_dhcp_threats:
+                    has_live_threats = any(threat_groups.values())
+                    if new_aliens or has_live_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
                             print(
@@ -437,6 +393,7 @@ class SentinelWatchdog:
                 except Exception as e:
                     if self.web_state:
                         self.web_state.set_scanning(False)
+                    log.debug("Sentinel audit iteration error", exc_info=True)
                     print(f"{Colors.YELLOW}[!] Sentinel audit iteration error: {e}{Colors.RESET}")
                     self._scan_trigger.wait(self.interval)
                     self._scan_trigger.clear()

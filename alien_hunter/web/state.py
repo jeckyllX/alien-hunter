@@ -67,6 +67,7 @@ class SentinelState:
                         "gateway_ip": getattr(network_info, "gateway_ip", ""),
                         "gateway_mac": getattr(network_info, "gateway_mac", ""),
                         "subnet_cidr": getattr(network_info, "subnet_cidr", ""),
+                        "prefix_len": getattr(network_info, "prefix_len", None),
                     }
                 elif isinstance(network_info, dict):
                     self.network_info = dict(network_info)

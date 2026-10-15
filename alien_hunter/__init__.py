@@ -5,7 +5,7 @@ LAN security auditor and network discovery tool
 
 __version__ = "1.0.0"
 
-from .models import Device, NetworkInfo, AuditResult
+from .models import Device, NetworkInfo, AuditResult, SentinelConfig
 from .core.engine import DiscoveryEngine
 from .core.sentinel import SentinelWatchdog
 from .config import ConfigManager
@@ -16,6 +16,7 @@ __all__ = [
     "Device",
     "NetworkInfo",
     "AuditResult",
+    "SentinelConfig",
     "DiscoveryEngine",
     "SentinelWatchdog",
     "ConfigManager",

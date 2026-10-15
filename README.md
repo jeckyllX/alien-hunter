@@ -96,8 +96,9 @@ sudo ./alien_hunter.py
 
 ```text
 alien_hunter/
-├── models.py             # Domain dataclasses (Device, NetworkInfo, AuditResult)
+├── models.py             # Domain dataclasses (Device, NetworkInfo, AuditResult, SentinelConfig)
 ├── config.py             # ConfigManager (path resolution, inventory persistence)
+├── logging_setup.py      # Shared stdlib logger for diagnostic (--debug) output
 ├── threats.py            # ThreatDetector (facade delegating to defense modules)
 ├── cli.py                # Command-line argument parsing and execution flow
 ├── core/
@@ -202,6 +203,7 @@ sudo ./alien_hunter.py --web --web-port 8080
 
 | Flag | Description |
 | :--- | :--- |
+| `-d, --debug` | Enables verbose diagnostic logging (`DEBUG` level) for socket and parser failures. |
 | `-i, --interface <dev>` | Network interface to scan (default: auto-detected from route table). |
 | `-p, --ports <specs>` | Custom ports or port range to scan (e.g. `80,443`, `1-1024`). |
 | `--deep` | Enables extended port scanning and promiscuous node detection. |

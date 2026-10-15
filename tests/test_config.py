@@ -83,14 +83,17 @@ class TestConfigManager(unittest.TestCase):
 
     def test_sentinel_sync_db_parameter(self):
         from alien_hunter.core.sentinel import SentinelWatchdog
+        from alien_hunter.models import SentinelConfig
 
         sentinel_default = SentinelWatchdog(
             engine=None,
             notifier=None,
             config_mgr=self.config_mgr,
-            whitelist_path=self.whitelist_file,
-            syn_scan_enabled=False,
-            dns_tunneling_enabled=False,
+            cfg=SentinelConfig(
+                whitelist_path=self.whitelist_file,
+                syn_scan_enabled=False,
+                dns_tunneling_enabled=False,
+            ),
         )
         self.assertTrue(sentinel_default.sync_db)
 
@@ -98,10 +101,12 @@ class TestConfigManager(unittest.TestCase):
             engine=None,
             notifier=None,
             config_mgr=self.config_mgr,
-            whitelist_path=self.whitelist_file,
-            syn_scan_enabled=False,
-            dns_tunneling_enabled=False,
-            sync_db=False,
+            cfg=SentinelConfig(
+                whitelist_path=self.whitelist_file,
+                syn_scan_enabled=False,
+                dns_tunneling_enabled=False,
+                sync_db=False,
+            ),
         )
         self.assertFalse(sentinel_no_sync.sync_db)
 

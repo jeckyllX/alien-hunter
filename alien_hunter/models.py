@@ -43,20 +43,35 @@ class NetworkInfo:
     gateway_ip: Optional[str] = None
     gateway_mac: Optional[str] = None
     subnet_base: str = ""
+    prefix_len: Optional[int] = None
 
     @property
     def subnet_cidr(self) -> str:
+        """
+        Returns the local subnet in CIDR form.
+
+        Prefers the kernel-reported prefix length (correct for /8, /16, and
+        non-/24 masks); falls back to a /24 assumption for callers that only
+        populate ``subnet_base``.
+        """
+        if self.local_ip and self.prefix_len is not None:
+            try:
+                net = ipaddress.ip_interface(f"{self.local_ip}/{self.prefix_len}").network
+                return str(net)
+            except (ValueError, TypeError):
+                pass
         return f"{self.subnet_base}.0/24" if self.subnet_base else ""
 
     @property
     def broadcast_ip(self) -> Optional[str]:
         """Calculates the authoritative broadcast address for any subnet size."""
-        if self.subnet_cidr:
+        cidr = self.subnet_cidr
+        if cidr:
             try:
-                return str(ipaddress.ip_network(self.subnet_cidr, strict=False).broadcast_address)
-            except Exception:
+                return str(ipaddress.ip_network(cidr, strict=False).broadcast_address)
+            except ValueError:
                 pass
-        return f"{self.subnet_base}.255" if self.subnet_base else None
+        return None
 
 
 @dataclass
@@ -136,3 +151,73 @@ class AuditResult:
             "threats": self.threats,
             "ai_posture": self.ai_posture.to_dict() if self.ai_posture and hasattr(self.ai_posture, "to_dict") else self.ai_posture,
         }
+
+
+@dataclass
+class SentinelConfig:
+    """
+    Bundled runtime configuration for the SentinelWatchdog daemon.
+
+    Groups the polling interval, interface/filesystem paths, web dashboard
+    settings, and every defense toggle and threshold into a single object,
+    replacing the previous 20+ parameter constructor.
+    """
+    interval: int = 300
+    deep_scan: bool = False
+    interface: Optional[str] = None
+    whitelist_path: Optional[str] = None
+    events_path: Optional[str] = None
+    custom_ports: Optional[List[int]] = None
+    sync_db: bool = True
+    web_enabled: bool = False
+    web_host: str = "0.0.0.0"
+    web_port: int = 8080
+    honey_ports: Optional[List[int]] = None
+    syn_scan_enabled: bool = True
+    dns_tunneling_enabled: bool = True
+    dhcp_starvation_enabled: bool = True
+    arp_poison_enabled: bool = True
+    icmp_redirect_enabled: bool = True
+    rogue_dhcp_enabled: bool = True
+    storm_guard_enabled: bool = True
+    cam_flood_threshold: int = 30
+    broadcast_storm_threshold: int = 150
+
+    @classmethod
+    def from_defense_config(
+        cls,
+        config: Optional[Dict[str, Any]] = None,
+        **overrides: Any,
+    ) -> "SentinelConfig":
+        """
+        Builds a SentinelConfig from a parsed ``config.json`` mapping, applying
+        the ``defenses``/``web_ui`` sections, then any explicit keyword overrides.
+        """
+        config = config or {}
+        defenses = config.get("defenses", {}) or {}
+        web = config.get("web_ui", {}) or {}
+
+        honey_enabled = defenses.get("honey_port_enabled", True)
+        values: Dict[str, Any] = {
+            "web_enabled": bool(web.get("enabled", False)),
+            "web_host": str(web.get("host", "0.0.0.0")),
+            "web_port": int(web.get("port", 8080)),
+            "honey_ports": defenses.get("honey_ports", [5555, 2323, 8888]) if honey_enabled else None,
+            "syn_scan_enabled": bool(defenses.get("syn_scan_enabled", True)),
+            "dns_tunneling_enabled": bool(defenses.get("dns_tunneling_enabled", True)),
+            "dhcp_starvation_enabled": bool(defenses.get("dhcp_starvation_enabled", True)),
+            "arp_poison_enabled": bool(defenses.get("arp_poison_enabled", True)),
+            "icmp_redirect_enabled": bool(defenses.get("icmp_redirect_enabled", True)),
+            "rogue_dhcp_enabled": bool(defenses.get("rogue_dhcp_enabled", True)),
+            "storm_guard_enabled": bool(defenses.get("storm_guard_enabled", True)),
+            "cam_flood_threshold": int(defenses.get("cam_flood_threshold", 30)),
+            "broadcast_storm_threshold": int(defenses.get("broadcast_storm_threshold", 150)),
+            "sync_db": bool(config.get("auto_sync_database", True)),
+        }
+        # Only apply overrides that correspond to real dataclass fields; silently
+        # ignore unknown keys so a stale config/CLI flag cannot crash startup.
+        known_fields = set(cls.__dataclass_fields__.keys())
+        values.update(
+            {k: v for k, v in overrides.items() if v is not None and k in known_fields}
+        )
+        return cls(**values)

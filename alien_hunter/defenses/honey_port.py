@@ -10,8 +10,10 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 
-
+from ..logging_setup import get_logger
 from .honey_auth import HoneyAuthTrap
+
+log = get_logger()
 
 
 class HoneyPortEvent:
@@ -89,8 +91,9 @@ class HoneyPortListener:
                     s.setblocking(False)
                     self.active_sockets[port] = s
                     bound_ports.append(port)
-                except Exception:
+                except Exception as e:
                     # Port already in use by host or permission denied (<1024 without root)
+                    log.debug("Honey-port bind failed on port %s: %s", port, e)
                     continue
 
             if bound_ports and not self._running:
@@ -102,7 +105,9 @@ class HoneyPortListener:
 
     def stop(self):
         """Stops the listener thread and closes all decoy sockets."""
-        self._running = False
+        with self._lock:
+            self._running = False
+
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
 
@@ -110,8 +115,8 @@ class HoneyPortListener:
             for port, s in list(self.active_sockets.items()):
                 try:
                     s.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("Honey-port socket close failed on port %s: %s", port, e)
             self.active_sockets.clear()
 
     def _listen_loop(self):
@@ -155,9 +160,11 @@ class HoneyPortListener:
                             except Exception:
                                 pass
 
-                    except Exception:
+                    except Exception as e:
+                        log.debug("Honey-port accept loop error: %s", e)
                         continue
-            except Exception:
+            except Exception as e:
+                log.debug("Honey-port select error: %s", e)
                 continue
 
     def drain_events(self) -> List[HoneyPortEvent]:
