@@ -9,7 +9,10 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 
+from .logging_setup import get_logger
 from .models import estimate_initial_ttl
+
+log = get_logger()
 
 
 class ConfigManager:
@@ -63,7 +66,8 @@ class ConfigManager:
         try:
             with open(filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to load JSON from %s: %s", filepath, e)
             return default
 
     @staticmethod
@@ -76,7 +80,8 @@ class ConfigManager:
             with open(filepath, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
             return True
-        except Exception:
+        except Exception as e:
+            log.debug("Failed to write JSON to %s: %s", filepath, e)
             return False
 
     def load_whitelist(self, custom_path: Optional[str] = None) -> Dict[str, dict]:

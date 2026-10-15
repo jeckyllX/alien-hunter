@@ -9,6 +9,7 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Set, Tuple, Any
 
+from ..logging_setup import get_logger
 from ..models import Device, NetworkInfo, AuditResult
 from ..scanners.arp import ArpScanner
 from ..scanners.router import RouterDnsAuditor
@@ -29,6 +30,8 @@ from ..identifiers.signatures import (
     TcpSynFingerprintStore,
 )
 from ..threats import ThreatDetector
+
+log = get_logger()
 
 
 
@@ -59,8 +62,10 @@ class DiscoveryEngine:
             if res.returncode == 0 and res.stdout:
                 parsed = json.loads(res.stdout)
                 return parsed if isinstance(parsed, list) else [parsed]
-        except Exception:
-            pass
+            if res.returncode != 0:
+                log.debug("`ip -json %s` exited %s: %s", " ".join(args), res.returncode, res.stderr.strip())
+        except Exception as e:
+            log.debug("`ip -json %s` invocation failed: %s", " ".join(args), e)
         return []
 
     @classmethod
@@ -109,12 +114,14 @@ class DiscoveryEngine:
         addrs = cls._run_ip_json("addr", "show", "dev", dev)
         my_ip = ""
         my_mac = ""
+        prefix_len: Optional[int] = None
 
         for a in addrs:
             my_mac = a.get("address", "").upper()
             for addr_info in a.get("addr_info", []):
                 if addr_info.get("family") == "inet":
                     my_ip = addr_info.get("local", "")
+                    prefix_len = addr_info.get("prefixlen")
                     break
 
         gateway_mac = None
@@ -135,6 +142,7 @@ class DiscoveryEngine:
             gateway_ip=gateway_ip,
             gateway_mac=gateway_mac,
             subnet_base=subnet_base,
+            prefix_len=prefix_len,
         )
 
     def _correlate_device(
@@ -221,6 +229,7 @@ class DiscoveryEngine:
         dhcp_fp_info = DhcpFingerprintStore.get_instance().get(mac)
         dhcp_fingerprint = None
         dhcp_params = None
+        dhcp_says_apple = False
         if dhcp_fp_info:
             dhcp_params = dhcp_fp_info.get("param_list")
             dhcp_match = self.signature_manager.match_dhcp(
@@ -230,7 +239,7 @@ class DiscoveryEngine:
                 dhcp_fingerprint = dhcp_match.vendor
                 notes.append(f"DHCP OS: {dhcp_match.vendor} ({dhcp_match.source})")
                 if "apple" in dhcp_match.vendor.lower():
-                    is_apple = True
+                    dhcp_says_apple = True
                 if is_rand and vendor == "Randomized Private MAC":
                     vendor = f"{dhcp_match.vendor} (Randomized MAC)"
             if dhcp_fp_info.get("hostname") and clean_host == "Unknown":
@@ -242,9 +251,16 @@ class DiscoveryEngine:
         )
         if resolved_name and clean_host == "Unknown":
             clean_host = resolved_name
+        # DHCP Option 55/60 can independently indicate an Apple stack (e.g. behind a
+        # privacy-randomized MAC); honor it when the identifier missed it.
+        if dhcp_says_apple and not is_apple:
+            is_apple = True
+            apple_type = "Apple Device"
         if is_apple:
-            if not friendly_name:
-                friendly_name = f"{apple_type} \"{resolved_name}\""
+            apple_type = apple_type or "Apple Device"
+            display = resolved_name or (clean_host if clean_host != "Unknown" else None)
+            if not friendly_name and display:
+                friendly_name = f"{apple_type} \"{display}\""
             vendor = f"Apple Inc. ({apple_type})"
 
         # Friendly name / vendor enrichment across all protocols

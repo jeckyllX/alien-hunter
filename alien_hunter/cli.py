@@ -15,10 +15,11 @@ from . import __version__
 from .config import ConfigManager
 from .core.engine import DiscoveryEngine
 from .core.sentinel import SentinelWatchdog
+from .logging_setup import configure as configure_logging
 from .reporting.console import ConsoleReporter, Colors
 from .notifications.engine import NotificationEngine
 from .ai.engine import AIEngine
-from .models import Device, NetworkInfo, AuditResult
+from .models import Device, NetworkInfo, AuditResult, SentinelConfig
 
 
 def check_daemon_status(host: str = "127.0.0.1", port: int = 8080) -> Optional[Dict[str, Any]]:
@@ -126,6 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Alien Hunter - LAN Security Auditor & Rogue Device Hunter",
     )
     parser.add_argument("-v", "--version", action="version", version=f"Alien Hunter v{__version__}")
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable verbose diagnostic logging (DEBUG level)")
     parser.add_argument("--whitelist-file", type=str, default="", help="Custom path to known_devices.json whitelist")
     parser.add_argument("--config-file", type=str, default="", help="Custom path to config.json")
     parser.add_argument("--events-file", type=str, default="", help="Custom path to events.jsonl audit log")
@@ -159,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+
+    configure_logging(debug=args.debug)
 
     need_root = not (args.test_notify or args.test_ai or args.update_signatures or args.set_ai_provider)
     if need_root and not args.no_delegate and not args.watch:
@@ -389,16 +393,17 @@ def main():
         storm_guard_enabled = defenses_cfg.get("storm_guard_enabled", True)
         cam_flood_threshold = int(defenses_cfg.get("cam_flood_threshold", 30))
         broadcast_storm_threshold = int(defenses_cfg.get("broadcast_storm_threshold", 150))
-        sentinel = SentinelWatchdog(
-            engine=engine,
-            notifier=notifier,
-            config_mgr=config_mgr,
-            whitelist_path=whitelist_path,
-            events_path=events_path,
+        sentinel_cfg = SentinelConfig(
             interval=args.interval,
             deep_scan=args.deep,
             interface=selected_interface,
-            ai_engine=ai_engine,
+            whitelist_path=whitelist_path,
+            events_path=events_path,
+            custom_ports=custom_ports,
+            sync_db=should_sync,
+            web_enabled=web_enabled,
+            web_host=web_host,
+            web_port=web_port,
             honey_ports=honey_ports,
             syn_scan_enabled=syn_scan_enabled,
             dns_tunneling_enabled=dns_tunneling_enabled,
@@ -409,11 +414,13 @@ def main():
             storm_guard_enabled=storm_guard_enabled,
             cam_flood_threshold=cam_flood_threshold,
             broadcast_storm_threshold=broadcast_storm_threshold,
-            sync_db=should_sync,
-            web_enabled=web_enabled,
-            web_host=web_host,
-            web_port=web_port,
-            custom_ports=custom_ports,
+        )
+        sentinel = SentinelWatchdog(
+            engine=engine,
+            notifier=notifier,
+            config_mgr=config_mgr,
+            cfg=sentinel_cfg,
+            ai_engine=ai_engine,
         )
         sentinel.start()
         return
@@ -479,6 +486,7 @@ def main():
             gateway_ip=net_data.get("gateway_ip"),
             gateway_mac=net_data.get("gateway_mac"),
             subnet_base=".".join(net_data.get("local_ip", "").split(".")[:3]) if net_data.get("local_ip") else "",
+            prefix_len=net_data.get("prefix_len"),
         )
 
         result = AuditResult(
