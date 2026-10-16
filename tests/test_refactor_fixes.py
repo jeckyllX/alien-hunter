@@ -361,6 +361,26 @@ class TestRunAuditSkipsActiveDefenses(unittest.TestCase):
         self.assertEqual(open_ports, ["445/SMB"])
         self.assertEqual(host_threats, [])
 
+    def test_local_mac_vpn_traffic_ignored_as_phantom(self):
+        from alien_hunter.models import Device
+        from alien_hunter.threats import ThreatDetector
+
+        local_mac = "02:00:00:00:00:11"
+        vpn_peer_dev = Device(
+            ip="10.10.0.5",
+            mac=local_mac,
+            hostname="Unknown",
+            vendor="Raspberry Pi Trading Ltd (GB)",
+            status="Online / Active",
+        )
+        threats = ThreatDetector.check_phantom_devices(
+            devices=[vpn_peer_dev],
+            subnet_cidr="192.168.1.0/24",
+            gateway_mac="02:00:00:00:00:01",
+            local_mac=local_mac,
+        )
+        self.assertEqual(threats, [])
+
 
 if __name__ == "__main__":
     unittest.main()

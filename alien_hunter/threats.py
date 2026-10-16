@@ -308,6 +308,7 @@ class ThreatDetector:
         devices: List[Any],
         subnet_cidr: Optional[str] = None,
         gateway_mac: Optional[str] = None,
+        local_mac: Optional[str] = None,
     ) -> List[str]:
         """
         Flags devices operating on foreign or out-of-subnet IP ranges.
@@ -318,12 +319,14 @@ class ThreatDetector:
             return threats
 
         gw_upper = gateway_mac.upper() if gateway_mac else None
+        local_upper = local_mac.upper() if local_mac else None
         for dev in devices:
             ip = getattr(dev, "ip", "")
             mac = getattr(dev, "mac", "")
             if not ip or not mac:
                 continue
-            if gw_upper and mac.upper() == gw_upper:
+            mac_upper = mac.upper()
+            if (gw_upper and mac_upper == gw_upper) or (local_upper and mac_upper == local_upper):
                 continue
             if PhantomSweeper.is_out_of_subnet(ip, subnet_cidr):
                 name = getattr(dev, "display_name", ip)
