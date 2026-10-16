@@ -325,6 +325,42 @@ class TestRunAuditSkipsActiveDefenses(unittest.TestCase):
             mock_starv.assert_not_called()
             mock_arp.assert_not_called()
 
+    @patch.object(
+        PortScanner,
+        "scan_host",
+        return_value=(
+            ["445/SMB"],
+            ["[HIGH] Port 445 (SMB): Direct SMB file sharing. Potential target for remote execution / ransomware."],
+            [],
+        ),
+    )
+    def test_whitelisted_baseline_port_suppresses_static_threat(self, _mock_scan):
+        engine = DiscoveryEngine()
+        mac = "64:4A:7D:D0:0E:1C"
+        whitelist = {
+            mac: {
+                "name": "Lenovo Work",
+                "trusted": True,
+                "ports": ["445/SMB"],
+            }
+        }
+        open_ports, host_threats, _notes = engine._audit_device_ports_and_threats(
+            ip="192.168.1.132",
+            mac=mac,
+            status="Online / Active",
+            clean_host="RE50E5",
+            friendly_name="Lenovo Work",
+            vendor="Intel",
+            whitelist=whitelist,
+            deep_scan=False,
+            custom_ports=None,
+            observed_ttl=128,
+            tcp_syn_fingerprint=None,
+            dhcp_fingerprint=None,
+        )
+        self.assertEqual(open_ports, ["445/SMB"])
+        self.assertEqual(host_threats, [])
+
 
 if __name__ == "__main__":
     unittest.main()
