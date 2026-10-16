@@ -6,6 +6,7 @@ Handles generic path resolution, storage, and persistence of trusted devices.
 import ipaddress
 import json
 import os
+import threading
 import time
 from typing import List, Dict, Any, Optional
 
@@ -72,16 +73,25 @@ class ConfigManager:
 
     @staticmethod
     def save_json(filepath: str, data: Any) -> bool:
-        """Safely write data to a JSON file."""
+        """Safely and atomically write data to a JSON file."""
+        tmp_path = None
         try:
-            parent = os.path.dirname(os.path.abspath(filepath))
+            abs_path = os.path.abspath(filepath)
+            parent = os.path.dirname(abs_path)
             if parent and not os.path.exists(parent):
                 os.makedirs(parent, exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
+            tmp_path = f"{abs_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_path, abs_path)
             return True
         except Exception as e:
             log.debug("Failed to write JSON to %s: %s", filepath, e)
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
             return False
 
     def load_whitelist(self, custom_path: Optional[str] = None) -> Dict[str, dict]:

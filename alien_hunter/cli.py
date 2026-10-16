@@ -103,9 +103,16 @@ def device_from_dict(d: Dict[str, Any]) -> Device:
         open_ports=port_strs,
         threats=d.get("threats", []),
         notes=d.get("notes", []),
+        mdns_services=d.get("mdns_services") or d.get("services") or [],
+        ws_types=d.get("ws_types", []),
         aliases=d.get("aliases", []),
         discovery_method=d.get("discovery_method", "Layer-2 ARP Scan"),
         ai_assessment=ai_obj,
+        dhcp_fingerprint=d.get("dhcp_fingerprint"),
+        dhcp_params=d.get("dhcp_params"),
+        ssdp_fingerprint=d.get("ssdp_fingerprint"),
+        tcp_syn_fingerprint=d.get("tcp_syn_fingerprint"),
+        observed_ttl=d.get("observed_ttl"),
     )
 
 
@@ -382,18 +389,8 @@ def main():
             print(f"    To restart the daemon, run: sudo systemctl restart alien-hunter.service")
             sys.exit(1)
 
-        defenses_cfg = config.get("defenses", {})
-        honey_ports = defenses_cfg.get("honey_ports", [5555, 2323, 8888]) if defenses_cfg.get("honey_port_enabled", True) else None
-        syn_scan_enabled = defenses_cfg.get("syn_scan_enabled", True)
-        dns_tunneling_enabled = defenses_cfg.get("dns_tunneling_enabled", True)
-        dhcp_starvation_enabled = defenses_cfg.get("dhcp_starvation_enabled", True)
-        arp_poison_enabled = defenses_cfg.get("arp_poison_enabled", True)
-        icmp_redirect_enabled = defenses_cfg.get("icmp_redirect_enabled", True)
-        rogue_dhcp_enabled = defenses_cfg.get("rogue_dhcp_enabled", True)
-        storm_guard_enabled = defenses_cfg.get("storm_guard_enabled", True)
-        cam_flood_threshold = int(defenses_cfg.get("cam_flood_threshold", 30))
-        broadcast_storm_threshold = int(defenses_cfg.get("broadcast_storm_threshold", 150))
-        sentinel_cfg = SentinelConfig(
+        sentinel_cfg = SentinelConfig.from_defense_config(
+            config,
             interval=args.interval,
             deep_scan=args.deep,
             interface=selected_interface,
@@ -404,16 +401,6 @@ def main():
             web_enabled=web_enabled,
             web_host=web_host,
             web_port=web_port,
-            honey_ports=honey_ports,
-            syn_scan_enabled=syn_scan_enabled,
-            dns_tunneling_enabled=dns_tunneling_enabled,
-            dhcp_starvation_enabled=dhcp_starvation_enabled,
-            arp_poison_enabled=arp_poison_enabled,
-            icmp_redirect_enabled=icmp_redirect_enabled,
-            rogue_dhcp_enabled=rogue_dhcp_enabled,
-            storm_guard_enabled=storm_guard_enabled,
-            cam_flood_threshold=cam_flood_threshold,
-            broadcast_storm_threshold=broadcast_storm_threshold,
         )
         sentinel = SentinelWatchdog(
             engine=engine,

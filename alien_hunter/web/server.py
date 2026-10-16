@@ -20,6 +20,10 @@ from urllib.parse import urlparse, parse_qs
 from .state import SentinelState
 from .ui import DASHBOARD_HTML
 from ..config import ConfigManager
+from ..logging_setup import get_logger
+from ..models import estimate_initial_ttl
+
+log = get_logger()
 
 MAC_REGEX = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$")
 
@@ -36,24 +40,30 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
 
     def _send_json_response(self, status_code: int, data: dict):
         body = json.dumps(data).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            log.debug("Client closed socket during JSON response write")
 
     def _send_html_response(self, status_code: int, html_str: str):
         body = html_str.encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status_code)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            log.debug("Client closed socket during HTML response write")
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -199,18 +209,47 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         whitelist_path: Optional[str] = getattr(self.server, "whitelist_path", None)
         state: Optional[SentinelState] = getattr(self.server, "state", None)
 
-        # Look up existing alien device in state to preserve discovered vendor if available
+        # Look up existing device in state to preserve discovered telemetry
         vendor = "Manual Entry"
+        discovered_dev: Optional[dict] = None
         if state:
             with state._lock:
-                for dev in state.alien_devices:
+                for dev in state.alien_devices + state.trusted_devices:
                     if dev.get("mac", "").upper() == mac:
-                        vendor = dev.get("vendor", vendor)
+                        discovered_dev = dict(dev)
+                        vendor = dev.get("vendor") or vendor
                         if not primary_ip:
                             primary_ip = dev.get("ip", "")
                         break
 
-        current_entry = {
+        current_entry: dict = {}
+        if discovered_dev:
+            for field_src, field_dst in (
+                ("ports", "ports"),
+                ("open_ports", "ports"),
+                ("services", "services"),
+                ("mdns_services", "services"),
+                ("aliases", "aliases"),
+            ):
+                val = discovered_dev.get(field_src)
+                if val and not current_entry.get(field_dst):
+                    current_entry[field_dst] = list(val)
+
+            disc_method = discovered_dev.get("discovery_method", "")
+            if disc_method:
+                methods = [m.strip() for m in str(disc_method).split(",") if m.strip()]
+                if methods:
+                    current_entry["discovery_methods"] = sorted(list(set(methods)))
+
+            obs_ttl = discovered_dev.get("observed_ttl")
+            if isinstance(obs_ttl, int) and obs_ttl > 0:
+                current_entry["baseline_ttl"] = estimate_initial_ttl(obs_ttl)
+
+            learned_os = discovered_dev.get("tcp_syn_fingerprint") or discovered_dev.get("dhcp_fingerprint")
+            if learned_os:
+                current_entry["baseline_os"] = learned_os
+
+        current_entry.update({
             "name": name,
             "owner": owner,
             "device_type": device_type,
@@ -218,12 +257,21 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             "vendor": vendor,
             "trusted": True,
             "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        }
+        })
 
-        # Persist to disk via ConfigManager if available
+        # Persist to disk via ConfigManager if available, merging with any existing record
         if config_mgr:
             try:
                 whitelist = config_mgr.load_whitelist(whitelist_path)
+                existing_entry = whitelist.get(mac)
+                if isinstance(existing_entry, dict):
+                    merged = dict(existing_entry)
+                    if not primary_ip and merged.get("primary_ip"):
+                        current_entry["primary_ip"] = merged["primary_ip"]
+                    if vendor == "Manual Entry" and merged.get("vendor"):
+                        current_entry["vendor"] = merged["vendor"]
+                    merged.update(current_entry)
+                    current_entry = merged
                 whitelist[mac] = current_entry
                 config_mgr.save_whitelist(whitelist, whitelist_path)
             except Exception as e:
@@ -242,9 +290,18 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
 
 
 class AlienHTTPServer(ThreadingHTTPServer):
-    """Threaded HTTP server with port reuse enabled."""
+    """Threaded HTTP server with port reuse enabled and quiet socket-reset handling."""
     allow_reuse_address = True
     daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Suppress multi-line tracebacks when clients abruptly close keep-alive sockets."""
+        import sys
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            log.debug("HTTP client %s closed connection early: %s", client_address, exc)
+            return
+        super().handle_error(request, client_address)
 
 
 class LightweightWebServer:
