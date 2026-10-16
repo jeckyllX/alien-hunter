@@ -649,6 +649,7 @@ class DiscoveryEngine:
             net_info.interface,
             subnet_cidr=net_info.subnet_cidr,
             gateway_mac=net_info.gateway_mac,
+            local_mac=net_info.local_mac,
         )
         passive_transmitters = sniffer.sniff(duration=passive_duration)
 
@@ -695,12 +696,14 @@ class DiscoveryEngine:
 
         # 9. Active & Passive Phantom Cross-Subnet Discovery
         gw_mac_upper = net_info.gateway_mac.upper() if net_info.gateway_mac else None
+        local_mac_upper = net_info.local_mac.upper() if net_info.local_mac else None
         if passive_duration > 0:
             # Derive phantom transmitters directly from PassiveFrameSniffer capture
             phantom_devices = {
                 p_ip: p_mac.upper()
                 for p_ip, p_mac in passive_transmitters.items()
                 if (not gw_mac_upper or p_mac.upper() != gw_mac_upper)
+                and (not local_mac_upper or p_mac.upper() != local_mac_upper)
                 and PhantomSweeper.is_out_of_subnet(p_ip, net_info.subnet_cidr)
             }
         else:
@@ -708,6 +711,7 @@ class DiscoveryEngine:
                 interface=net_info.interface,
                 subnet_cidr=net_info.subnet_cidr,
                 gateway_mac=net_info.gateway_mac,
+                local_mac=net_info.local_mac,
             )
             phantom_devices = phantom_sweeper.scan(duration=1.0)
             for p_ip, p_mac in phantom_devices.items():
@@ -877,6 +881,7 @@ class DiscoveryEngine:
                 devices=inventory,
                 subnet_cidr=net_info.subnet_cidr,
                 gateway_mac=net_info.gateway_mac,
+                local_mac=net_info.local_mac,
             )
         )
 

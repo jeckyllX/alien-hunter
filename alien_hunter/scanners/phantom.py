@@ -31,10 +31,12 @@ class PhantomSweeper:
         interface: Optional[str] = None,
         subnet_cidr: Optional[str] = None,
         gateway_mac: Optional[str] = None,
+        local_mac: Optional[str] = None,
     ):
         self.interface = interface
         self.subnet_cidr = subnet_cidr
         self.gateway_mac = gateway_mac.upper() if gateway_mac else None
+        self.local_mac = local_mac.upper() if local_mac else None
         self._local_network = None
         if subnet_cidr:
             try:
@@ -95,8 +97,11 @@ class PhantomSweeper:
                     if src_mac == self.NULL_MAC:
                         continue
 
-                    # Filter out frames originating from the default gateway router
-                    if self.gateway_mac and src_mac.upper() == self.gateway_mac:
+                    src_mac_upper = src_mac.upper()
+                    # Filter out frames originating from the default gateway router or local host
+                    if (self.gateway_mac and src_mac_upper == self.gateway_mac) or (
+                        self.local_mac and src_mac_upper == self.local_mac
+                    ):
                         continue
 
                     proto = struct.unpack("!H", pkt[12:14])[0]

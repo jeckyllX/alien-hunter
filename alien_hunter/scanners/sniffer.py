@@ -27,10 +27,12 @@ class PassiveFrameSniffer:
         interface: Optional[str] = None,
         subnet_cidr: Optional[str] = None,
         gateway_mac: Optional[str] = None,
+        local_mac: Optional[str] = None,
     ):
         self.interface = interface
         self.subnet_cidr = subnet_cidr
         self.gateway_mac = gateway_mac.upper() if gateway_mac else None
+        self.local_mac = local_mac.upper() if local_mac else None
         self._local_network = None
         if subnet_cidr:
             try:
@@ -42,7 +44,7 @@ class PassiveFrameSniffer:
         """
         Passively listens for Ethernet frames over a short duration using promiscuous mode.
         Returns a mapping of {IP_ADDRESS: MAC_ADDRESS} for observed transmitters on the local link.
-        Filters out transit WAN internet traffic forwarded through the gateway.
+        Filters out transit WAN internet traffic forwarded through the gateway or local VPN/tunnel router.
         """
         unadvertised: Dict[str, str] = {}
         raw_sock = None
@@ -75,6 +77,7 @@ class PassiveFrameSniffer:
                     proto = struct.unpack("!H", pkt[12:14])[0]
 
                     if src_mac != "00:00:00:00:00:00":
+                        src_mac_upper = src_mac.upper()
                         # ARP Packet (strictly local Layer-2 broadcast domain)
                         if proto == 0x0806 and len(pkt) >= 42:
                             sender_ip = socket.inet_ntoa(pkt[28:32])
@@ -93,13 +96,16 @@ class PassiveFrameSniffer:
                                 if ip_obj.is_multicast or ip_obj.is_unspecified or ip_obj.is_loopback:
                                     continue
 
-                                # Discard transit WAN packets from external internet servers
-                                # forwarded through the gateway. Only catalog hosts on the local link:
-                                is_from_gw = bool(self.gateway_mac and src_mac.upper() == self.gateway_mac)
+                                # Discard transit WAN/VPN packets forwarded through the gateway or local machine.
+                                # Only catalog hosts on the local link:
+                                is_from_gw_or_self = bool(
+                                    (self.gateway_mac and src_mac_upper == self.gateway_mac)
+                                    or (self.local_mac and src_mac_upper == self.local_mac)
+                                )
                                 if self._local_network:
                                     if ip_obj in self._local_network or ip_obj.is_link_local:
                                         unadvertised[src_ip] = src_mac
-                                    elif ip_obj.is_private and not is_from_gw:
+                                    elif ip_obj.is_private and not is_from_gw_or_self:
                                         # Out-of-subnet local transmitter
                                         unadvertised[src_ip] = src_mac
                                 elif ip_obj.is_private or ip_obj.is_link_local:
