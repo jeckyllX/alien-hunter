@@ -265,7 +265,25 @@ class DiscoveryEngine:
                 ip, deep_scan=deep_scan, ports=custom_ports
             )
             port_notes.extend(notes_ports)
-            host_threats.extend([f"{ip} ({clean_host}): {t}" for t in detected_threats])
+
+            w_entry = whitelist.get(mac) if mac else None
+            baseline_port_nums: Set[str] = set()
+            if w_entry and w_entry.get("trusted", True):
+                for bp in (w_entry.get("ports") or w_entry.get("baseline_ports") or []):
+                    bp_str = str(bp)
+                    baseline_port_nums.add(bp_str.split("/")[0] if "/" in bp_str else bp_str)
+
+            for t in detected_threats:
+                # Example format: "[HIGH] Port 445 (SMB): ..."
+                # Suppress static vulnerability warnings for ports already whitelisted on this trusted host.
+                suppressed = False
+                if baseline_port_nums and "Port " in t:
+                    after_port = t.split("Port ", 1)[1]
+                    p_num = after_port.split(" ", 1)[0].strip()
+                    if p_num in baseline_port_nums:
+                        suppressed = True
+                if not suppressed:
+                    host_threats.append(f"{ip} ({clean_host}): {t}")
 
             # Port Drift & Baseline Anomaly Check
             if open_ports and mac != "N/A (Asleep)":
@@ -274,7 +292,7 @@ class DiscoveryEngine:
                     mac=mac,
                     display_name=friendly_name or clean_host or vendor,
                     current_open_ports=open_ports,
-                    whitelist_entry=whitelist.get(mac),
+                    whitelist_entry=w_entry,
                 )
                 host_threats.extend(drift_threats)
 
