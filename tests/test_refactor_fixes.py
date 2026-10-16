@@ -169,5 +169,163 @@ class TestAppleDhcpUnmasking(unittest.TestCase):
         self.assertIn("Apple", dev.vendor)
 
 
+class TestAtomicSaveJson(unittest.TestCase):
+    """Validates atomic file replacement in ConfigManager.save_json (F4a)."""
+
+    def test_atomic_save_replaces_file_and_leaves_no_tmp(self):
+        import os
+        import tempfile
+        from alien_hunter.config import ConfigManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = os.path.join(tmpdir, "known_devices.json")
+            ConfigManager.save_json(target, {"AA:BB:CC:DD:EE:FF": {"name": "TestHost"}})
+            self.assertTrue(os.path.exists(target))
+            loaded = ConfigManager.load_json(target, {})
+            self.assertEqual(loaded["AA:BB:CC:DD:EE:FF"]["name"], "TestHost")
+            leftovers = [f for f in os.listdir(tmpdir) if ".tmp." in f]
+            self.assertEqual(leftovers, [])
+
+
+class TestWebStateAndDeviceRoundTrip(unittest.TestCase):
+    """Validates device serialization, threat mapping, and whitelist updates (F4b-F4d)."""
+
+    def test_device_to_dict_and_cli_from_dict_round_trip(self):
+        from alien_hunter.models import Device
+        from alien_hunter.web.state import SentinelState
+        from alien_hunter.cli import device_from_dict
+
+        dev = Device(
+            ip="192.168.1.50",
+            mac="FA:CE:00:11:22:33",
+            hostname="TestPhone",
+            vendor="Randomized (Private) MAC",
+            friendly_name="TestPhone",
+            status="Online / Active",
+            is_randomized=True,
+            is_apple=True,
+            mdns_services=["_companion-link._tcp"],
+            ws_types=["Device"],
+            dhcp_fingerprint="Apple iOS",
+            dhcp_params=[1, 3, 6, 15],
+            ssdp_fingerprint="UPnP/1.0",
+            tcp_syn_fingerprint="iOS/macOS",
+            observed_ttl=64,
+        )
+        serialized = SentinelState._device_to_dict(dev)
+        self.assertTrue(serialized["is_randomized"])
+        self.assertTrue(serialized["is_apple"])
+        self.assertEqual(serialized["dhcp_fingerprint"], "Apple iOS")
+        self.assertEqual(serialized["observed_ttl"], 64)
+
+        reconstructed = device_from_dict(serialized)
+        self.assertEqual(reconstructed.mdns_services, ["_companion-link._tcp"])
+        self.assertEqual(reconstructed.ws_types, ["Device"])
+        self.assertEqual(reconstructed.dhcp_fingerprint, "Apple iOS")
+        self.assertEqual(reconstructed.dhcp_params, [1, 3, 6, 15])
+        self.assertEqual(reconstructed.ssdp_fingerprint, "UPnP/1.0")
+        self.assertEqual(reconstructed.tcp_syn_fingerprint, "iOS/macOS")
+        self.assertEqual(reconstructed.observed_ttl, 64)
+
+    def test_record_threat_event_mappings_and_severity(self):
+        from alien_hunter.web.state import SentinelState
+
+        state = SentinelState()
+        state._record_threat_event("CRITICAL: ROGUE DHCP SERVER at 192.168.1.99")
+        state._record_threat_event("CRITICAL: MAC Spoofing (Doppelganger) by AA:BB:CC:DD:EE:FF")
+        state._record_threat_event("WARNING: Out-of-Subnet Phantom Implant transmitting: 11:22:33:44:55:66")
+        state._record_threat_event("CRITICAL: L2 Broadcast Storm detected (500 fps)")
+
+        payload = state.get_events_payload(limit=20)
+        events_by_type = {e["event_type"]: e for e in payload["events"]}
+        self.assertIn("ROGUE_DHCP_DETECTED", events_by_type)
+        self.assertEqual(events_by_type["ROGUE_DHCP_DETECTED"]["severity"], "CRITICAL")
+        self.assertIn("DOPPELGANGER_DETECTED", events_by_type)
+        self.assertEqual(events_by_type["DOPPELGANGER_DETECTED"]["severity"], "CRITICAL")
+        self.assertIn("PHANTOM_DEVICE_DETECTED", events_by_type)
+        self.assertEqual(events_by_type["PHANTOM_DEVICE_DETECTED"]["severity"], "WARN")
+        self.assertIn("L2_STORM_DETECTED", events_by_type)
+        self.assertEqual(events_by_type["L2_STORM_DETECTED"]["severity"], "CRITICAL")
+
+    def test_update_whitelist_entry_updates_in_place_without_duplicates(self):
+        from alien_hunter.web.state import SentinelState
+
+        state = SentinelState()
+        state.trusted_devices = [{
+            "ip": "192.168.1.10",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "name": "OldName",
+            "vendor": "Intel",
+            "status": "Online / Active",
+            "ports": [22],
+        }]
+        state.update_whitelist_entry(
+            "AA:BB:CC:DD:EE:FF",
+            {"name": "NewName", "owner": "Admin", "device_type": "Workstation"},
+        )
+        self.assertEqual(len(state.trusted_devices), 1)
+        self.assertEqual(state.trusted_devices[0]["name"], "NewName")
+        self.assertEqual(state.trusted_devices[0]["owner"], "Admin")
+        self.assertEqual(state.trusted_devices[0]["device_type"], "Workstation")
+        self.assertEqual(state.trusted_devices[0]["ports"], [22])
+
+
+class TestRunAuditSkipsActiveDefenses(unittest.TestCase):
+    """Validates DiscoveryEngine.run_audit skipping redundant one-shot sniffers (F2)."""
+
+    def test_run_audit_skips_background_active_guards(self):
+        from alien_hunter.core import engine as engine_mod
+        from alien_hunter.models import Device
+        from alien_hunter.threats import ThreatDetector
+
+        engine = DiscoveryEngine()
+        net_info = NetworkInfo(
+            "eth0", "192.168.1.73", "00:11:22:33:44:55",
+            gateway_ip="192.168.1.1", gateway_mac="AA:BB:CC:DD:EE:FF",
+            subnet_base="192.168.1", prefix_len=24,
+        )
+
+        with patch.object(DiscoveryEngine, "get_network_info", return_value=net_info), \
+             patch.object(engine_mod.ArpScanner, "scan", return_value={}), \
+             patch.object(engine_mod.RouterDnsAuditor, "audit_subnet", return_value={}), \
+             patch.object(engine_mod.PassiveFrameSniffer, "sniff", return_value={}), \
+             patch.object(engine_mod.SsdpScanner, "scan", return_value={}), \
+             patch.object(engine_mod.NetbiosScanner, "scan", return_value={}), \
+             patch.object(engine_mod.MdnsScanner, "scan", return_value={}), \
+             patch.object(engine_mod.WsDiscoveryScanner, "scan", return_value={}), \
+             patch.object(engine_mod.Ipv6DiscoveryScanner, "scan", return_value={}), \
+             patch.object(engine_mod.PhantomSweeper, "scan", return_value={}), \
+             patch.object(ThreatDetector, "check_llmnr_poisoning", return_value=[]), \
+             patch.object(ThreatDetector, "check_mdns_poisoning", return_value=[]), \
+             patch.object(ThreatDetector, "check_dns_integrity", return_value=[]), \
+             patch.object(ThreatDetector, "check_rogue_ipv6_ra", return_value=[]), \
+             patch.object(ThreatDetector, "check_phantom_devices", return_value=[]), \
+             patch.object(ThreatDetector, "check_rogue_dhcp") as mock_dhcp, \
+             patch.object(ThreatDetector, "check_syn_scans") as mock_syn, \
+             patch.object(ThreatDetector, "check_dns_tunneling") as mock_dns, \
+             patch.object(ThreatDetector, "check_dhcp_starvation") as mock_starv, \
+             patch.object(ThreatDetector, "check_realtime_arp_poisoning") as mock_arp, \
+             patch.object(engine, "_correlate_device", return_value=(Device(ip="192.168.1.1", mac="AA:BB:CC:DD:EE:FF"), [])):
+
+            engine.run_audit(
+                whitelist={},
+                passive_duration=0,
+                active_background_defenses={
+                    "rogue_dhcp": True,
+                    "syn_scan": True,
+                    "dns_tunneling": True,
+                    "dhcp_starvation": True,
+                    "arp_poison": True,
+                },
+            )
+
+            mock_dhcp.assert_not_called()
+            mock_syn.assert_not_called()
+            mock_dns.assert_not_called()
+            mock_starv.assert_not_called()
+            mock_arp.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
+

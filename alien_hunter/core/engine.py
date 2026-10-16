@@ -145,25 +145,16 @@ class DiscoveryEngine:
             prefix_len=prefix_len,
         )
 
-    def _correlate_device(
-        self,
+    @staticmethod
+    def _resolve_device_mac(
         ip: str,
         net_info: NetworkInfo,
         active_devices: Dict[str, str],
-        dns_leases: Dict[str, str],
-        ssdp_devices: Dict[str, Dict[str, Any]],
-        netbios_devices: Dict[str, Dict[str, Any]],
-        passive_transmitters: Dict[str, str],
-        passive_only_ips: Set[str],
+        ipv6_devices: Optional[Dict[str, str]],
+        mdns_devices: Optional[Dict[str, Dict[str, Any]]],
         whitelist: Dict[str, dict],
-        deep_scan: bool = False,
-        mdns_devices: Optional[Dict[str, Dict[str, Any]]] = None,
-        ws_devices: Optional[Dict[str, Dict[str, Any]]] = None,
-        ipv6_devices: Optional[Dict[str, str]] = None,
-        custom_ports: Optional[List[int]] = None,
-        phantom_devices: Optional[Dict[str, str]] = None,
-    ) -> Tuple[Device, List[str]]:
-        """Correlates multiple discovery signals into an enriched Device object and host threats."""
+    ) -> Optional[str]:
+        """Resolves a device's hardware MAC address across ARP, IPv6, local/gateway, mDNS aliases, and whitelist."""
         mac = active_devices.get(ip)
         if not mac and ipv6_devices:
             mac = ipv6_devices.get(ip)
@@ -189,6 +180,147 @@ class DiscoveryEngine:
                 if w_info.get("primary_ip") == ip or ip in w_info.get("aliases", []):
                     mac = w_mac
                     break
+
+        return mac
+
+    @staticmethod
+    def _compute_device_status(
+        ip: str,
+        net_info: NetworkInfo,
+        active_devices: Dict[str, str],
+        ssdp_devices: Dict[str, Dict[str, Any]],
+        netbios_devices: Dict[str, Dict[str, Any]],
+        mdns_devices: Optional[Dict[str, Dict[str, Any]]],
+        ws_devices: Optional[Dict[str, Dict[str, Any]]],
+        passive_transmitters: Dict[str, str],
+    ) -> str:
+        """Determines whether a discovered IP is the local machine, actively online, or an inactive lease."""
+        if ip == net_info.local_ip:
+            return "Local Machine"
+        if (
+            ip in active_devices
+            or ip in ssdp_devices
+            or ip in netbios_devices
+            or (mdns_devices and ip in mdns_devices)
+            or (ws_devices and ip in ws_devices)
+            or ip in passive_transmitters
+        ):
+            return "Online / Active"
+        return "Sleeping / Inactive Lease"
+
+    @staticmethod
+    def _build_discovery_methods(
+        ip: str,
+        active_devices: Dict[str, str],
+        passive_only_ips: Set[str],
+        dns_leases: Dict[str, str],
+        mdns_data: Optional[Dict[str, Any]],
+        ws_data: Optional[Dict[str, Any]],
+        ssdp_data: Optional[Dict[str, Any]],
+        nb_data: Optional[Dict[str, Any]],
+        phantom_devices: Optional[Dict[str, str]],
+    ) -> str:
+        """Compiles a comma-separated description of all protocols that observed this host."""
+        discovery_methods: List[str] = []
+        if phantom_devices and ip in phantom_devices:
+            discovery_methods.append("Phantom Cross-Subnet (Promiscuous Layer-2)")
+        if ip in active_devices and ip not in passive_only_ips:
+            discovery_methods.append("Layer-2 ARP Scan")
+        if ip in passive_only_ips:
+            discovery_methods.append("Passive Frame Sniffer (Promiscuous Mode)")
+        if mdns_data:
+            discovery_methods.append("mDNS (Multicast DNS)")
+        if ws_data:
+            discovery_methods.append("WS-Discovery")
+        if ssdp_data:
+            discovery_methods.append("SSDP / UPnP")
+        if nb_data:
+            discovery_methods.append("NetBIOS Node Status")
+        if ip in dns_leases and not discovery_methods:
+            discovery_methods.append("Router DHCP Lease")
+        return ", ".join(discovery_methods) if discovery_methods else "Active ARP Sweep"
+
+    def _audit_device_ports_and_threats(
+        self,
+        ip: str,
+        mac: str,
+        status: str,
+        clean_host: str,
+        friendly_name: Optional[str],
+        vendor: str,
+        whitelist: Dict[str, dict],
+        deep_scan: bool,
+        custom_ports: Optional[List[int]],
+        observed_ttl: Optional[int],
+        tcp_syn_fingerprint: Optional[str],
+        dhcp_fingerprint: Optional[str],
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Executes port scanning, port drift analysis, and doppelganger checks for a single host."""
+        open_ports: List[str] = []
+        host_threats: List[str] = []
+        port_notes: List[str] = []
+
+        if status in ("Online / Active", "Local Machine"):
+            open_ports, detected_threats, notes_ports = self.port_scanner.scan_host(
+                ip, deep_scan=deep_scan, ports=custom_ports
+            )
+            port_notes.extend(notes_ports)
+            host_threats.extend([f"{ip} ({clean_host}): {t}" for t in detected_threats])
+
+            # Port Drift & Baseline Anomaly Check
+            if open_ports and mac != "N/A (Asleep)":
+                drift_threats = ThreatDetector.check_port_drift(
+                    ip=ip,
+                    mac=mac,
+                    display_name=friendly_name or clean_host or vendor,
+                    current_open_ports=open_ports,
+                    whitelist_entry=whitelist.get(mac),
+                )
+                host_threats.extend(drift_threats)
+
+        # Hardware Doppelgänger & Identity Spoofing Check (MITRE ATT&CK T1036)
+        if mac and not mac.startswith("N/A"):
+            doppel_threats = ThreatDetector.check_device_doppelganger(
+                ip=ip,
+                mac=mac,
+                display_name=friendly_name or clean_host or vendor,
+                observed_ttl=observed_ttl,
+                current_os=tcp_syn_fingerprint,
+                dhcp_os=dhcp_fingerprint,
+                whitelist_entry=whitelist.get(mac),
+                vendor=vendor,
+            )
+            host_threats.extend(doppel_threats)
+
+        return open_ports, host_threats, port_notes
+
+    def _correlate_device(
+        self,
+        ip: str,
+        net_info: NetworkInfo,
+        active_devices: Dict[str, str],
+        dns_leases: Dict[str, str],
+        ssdp_devices: Dict[str, Dict[str, Any]],
+        netbios_devices: Dict[str, Dict[str, Any]],
+        passive_transmitters: Dict[str, str],
+        passive_only_ips: Set[str],
+        whitelist: Dict[str, dict],
+        deep_scan: bool = False,
+        mdns_devices: Optional[Dict[str, Dict[str, Any]]] = None,
+        ws_devices: Optional[Dict[str, Dict[str, Any]]] = None,
+        ipv6_devices: Optional[Dict[str, str]] = None,
+        custom_ports: Optional[List[int]] = None,
+        phantom_devices: Optional[Dict[str, str]] = None,
+    ) -> Tuple[Device, List[str]]:
+        """Correlates multiple discovery signals into an enriched Device object and host threats."""
+        mac = self._resolve_device_mac(
+            ip=ip,
+            net_info=net_info,
+            active_devices=active_devices,
+            ipv6_devices=ipv6_devices,
+            mdns_devices=mdns_devices,
+            whitelist=whitelist,
+        )
 
         raw_hostname = dns_leases.get(ip, "")
         clean_host = RouterDnsAuditor.clean_hostname(raw_hostname) or "Unknown"
@@ -349,31 +481,24 @@ class DiscoveryEngine:
                     friendly_name = f"{w_info.get('name')} (DHCP Lease)"
                     break
 
-        # Live State determination
-        if ip == net_info.local_ip:
-            status = "Local Machine"
+        status = self._compute_device_status(
+            ip=ip,
+            net_info=net_info,
+            active_devices=active_devices,
+            ssdp_devices=ssdp_devices,
+            netbios_devices=netbios_devices,
+            mdns_devices=mdns_devices,
+            ws_devices=ws_devices,
+            passive_transmitters=passive_transmitters,
+        )
+        if status == "Local Machine":
             is_trusted = True
-        elif (
-            ip in active_devices
-            or ip in ssdp_devices
-            or ip in netbios_devices
-            or (mdns_devices and ip in mdns_devices)
-            or (ws_devices and ip in ws_devices)
-            or ip in passive_transmitters
-        ):
-            status = "Online / Active"
-        else:
-            status = "Sleeping / Inactive Lease"
 
         if not mac:
             if status == "Sleeping / Inactive Lease":
                 mac = "N/A (Asleep)"
             else:
                 mac = "N/A (Virtual / Alias)"
-
-        # Security Port Probing
-        open_ports: List[str] = []
-        host_threats: List[str] = []
 
         # Add scanner metadata notes
         if nb_data and nb_data.get("workgroup"):
@@ -394,37 +519,21 @@ class DiscoveryEngine:
         if ip in passive_only_ips:
             notes.append("Passively Sniffed (Promiscuous Mode)")
 
-        if status in ("Online / Active", "Local Machine"):
-            open_ports, detected_threats, notes_ports = self.port_scanner.scan_host(
-                ip, deep_scan=deep_scan, ports=custom_ports
-            )
-            notes.extend(notes_ports)
-            host_threats.extend([f"{ip} ({clean_host}): {t}" for t in detected_threats])
-
-            # Port Drift & Baseline Anomaly Check
-            if open_ports and mac != "N/A (Asleep)":
-                drift_threats = ThreatDetector.check_port_drift(
-                    ip=ip,
-                    mac=mac,
-                    display_name=friendly_name or clean_host or vendor,
-                    current_open_ports=open_ports,
-                    whitelist_entry=whitelist.get(mac),
-                )
-                host_threats.extend(drift_threats)
-
-        # Hardware Doppelgänger & Identity Spoofing Check (MITRE ATT&CK T1036)
-        if mac and not mac.startswith("N/A"):
-            doppel_threats = ThreatDetector.check_device_doppelganger(
-                ip=ip,
-                mac=mac,
-                display_name=friendly_name or clean_host or vendor,
-                observed_ttl=observed_ttl,
-                current_os=tcp_syn_fingerprint,
-                dhcp_os=dhcp_fingerprint,
-                whitelist_entry=whitelist.get(mac),
-                vendor=vendor,
-            )
-            host_threats.extend(doppel_threats)
+        open_ports, host_threats, port_notes = self._audit_device_ports_and_threats(
+            ip=ip,
+            mac=mac,
+            status=status,
+            clean_host=clean_host,
+            friendly_name=friendly_name,
+            vendor=vendor,
+            whitelist=whitelist,
+            deep_scan=deep_scan,
+            custom_ports=custom_ports,
+            observed_ttl=observed_ttl,
+            tcp_syn_fingerprint=tcp_syn_fingerprint,
+            dhcp_fingerprint=dhcp_fingerprint,
+        )
+        notes.extend(port_notes)
 
         # Flag out-of-subnet static host / phantom drop box
         if PhantomSweeper.is_out_of_subnet(ip, net_info.subnet_cidr) and ip != net_info.gateway_ip and ip != net_info.local_ip:
@@ -432,26 +541,17 @@ class DiscoveryEngine:
 
         is_alien = (not is_trusted) and (status == "Online / Active")
 
-        # Determine how this device was discovered
-        discovery_methods: List[str] = []
-        if phantom_devices and ip in phantom_devices:
-            discovery_methods.append("Phantom Cross-Subnet (Promiscuous Layer-2)")
-        if ip in active_devices and ip not in passive_only_ips:
-            discovery_methods.append("Layer-2 ARP Scan")
-        if ip in passive_only_ips:
-            discovery_methods.append("Passive Frame Sniffer (Promiscuous Mode)")
-        if mdns_data:
-            discovery_methods.append("mDNS (Multicast DNS)")
-        if ws_data:
-            discovery_methods.append("WS-Discovery")
-        if ssdp_data:
-            discovery_methods.append("SSDP / UPnP")
-        if nb_data:
-            discovery_methods.append("NetBIOS Node Status")
-        if ip in dns_leases and not discovery_methods:
-            discovery_methods.append("Router DHCP Lease")
-
-        discovery_str = ", ".join(discovery_methods) if discovery_methods else "Active ARP Sweep"
+        discovery_str = self._build_discovery_methods(
+            ip=ip,
+            active_devices=active_devices,
+            passive_only_ips=passive_only_ips,
+            dns_leases=dns_leases,
+            mdns_data=mdns_data,
+            ws_data=ws_data,
+            ssdp_data=ssdp_data,
+            nb_data=nb_data,
+            phantom_devices=phantom_devices,
+        )
 
         aliases = mdns_data.get("aliases", []) if mdns_data else []
         if aliases:
@@ -485,7 +585,6 @@ class DiscoveryEngine:
         return dev_obj, host_threats
 
     def run_audit(
-
         self,
         whitelist: Dict[str, dict],
         deep_scan: bool = False,
@@ -494,6 +593,7 @@ class DiscoveryEngine:
         interface: Optional[str] = None,
         ai_engine: Optional[Any] = None,
         custom_ports: Optional[List[int]] = None,
+        active_background_defenses: Optional[Dict[str, bool]] = None,
     ) -> AuditResult:
         """
         Executes a complete multi-layered network audit:
@@ -576,15 +676,25 @@ class DiscoveryEngine:
         ipv6_devices = ipv6_scanner.scan(timeout=1.2)
 
         # 9. Active & Passive Phantom Cross-Subnet Discovery
-        phantom_sweeper = PhantomSweeper(
-            interface=net_info.interface,
-            subnet_cidr=net_info.subnet_cidr,
-            gateway_mac=net_info.gateway_mac,
-        )
-        phantom_devices = phantom_sweeper.scan(duration=1.0)
-        for p_ip, p_mac in phantom_devices.items():
-            if p_ip not in active_devices:
-                active_devices[p_ip] = p_mac
+        gw_mac_upper = net_info.gateway_mac.upper() if net_info.gateway_mac else None
+        if passive_duration > 0:
+            # Derive phantom transmitters directly from PassiveFrameSniffer capture
+            phantom_devices = {
+                p_ip: p_mac.upper()
+                for p_ip, p_mac in passive_transmitters.items()
+                if (not gw_mac_upper or p_mac.upper() != gw_mac_upper)
+                and PhantomSweeper.is_out_of_subnet(p_ip, net_info.subnet_cidr)
+            }
+        else:
+            phantom_sweeper = PhantomSweeper(
+                interface=net_info.interface,
+                subnet_cidr=net_info.subnet_cidr,
+                gateway_mac=net_info.gateway_mac,
+            )
+            phantom_devices = phantom_sweeper.scan(duration=1.0)
+            for p_ip, p_mac in phantom_devices.items():
+                if p_ip not in active_devices:
+                    active_devices[p_ip] = p_mac
 
         # Combine all discovered IPs
         all_ips: Set[str] = (
@@ -603,20 +713,23 @@ class DiscoveryEngine:
         if net_info.local_ip:
             all_ips.add(net_info.local_ip)
 
+        bg_defenses = active_background_defenses or {}
+
         # Threat Detection & Active Defenses:
         # a) ARP Spoofing / Rogue Gateway
         threats: List[str] = ThreatDetector.check_arp_spoofing(
             active_devices, net_info.gateway_ip, net_info.gateway_mac
         )
         # b) Rogue DHCP Server / Rogue Gateway Probe
-        threats.extend(
-            ThreatDetector.check_rogue_dhcp(
-                interface=net_info.interface,
-                local_mac=net_info.local_mac,
-                gateway_ip=net_info.gateway_ip,
-                gateway_mac=net_info.gateway_mac,
+        if not bg_defenses.get("rogue_dhcp"):
+            threats.extend(
+                ThreatDetector.check_rogue_dhcp(
+                    interface=net_info.interface,
+                    local_mac=net_info.local_mac,
+                    gateway_ip=net_info.gateway_ip,
+                    gateway_mac=net_info.gateway_mac,
+                )
             )
-        )
         # c) Active LLMNR / NBT-NS Poisoning Canary Trap (Anti-Responder)
         threats.extend(
             ThreatDetector.check_llmnr_poisoning(
@@ -660,48 +773,52 @@ class DiscoveryEngine:
             threats.extend(ThreatDetector.check_wifi_threats(current_ssid))
 
         # i) Stealth TCP Half-Open / SYN Port Scan Detector
-        threats.extend(
-            ThreatDetector.check_syn_scans(
-                interface=net_info.interface,
-                subnet_cidr=net_info.subnet_cidr,
-                local_ip=net_info.local_ip,
-                local_mac=net_info.local_mac,
-                duration=1.0,
+        if not bg_defenses.get("syn_scan"):
+            threats.extend(
+                ThreatDetector.check_syn_scans(
+                    interface=net_info.interface,
+                    subnet_cidr=net_info.subnet_cidr,
+                    local_ip=net_info.local_ip,
+                    local_mac=net_info.local_mac,
+                    duration=1.0,
+                )
             )
-        )
 
         # j) High-Entropy DNS Tunneling & Exfiltration Detector
-        threats.extend(
-            ThreatDetector.check_dns_tunneling(
-                interface=net_info.interface,
-                subnet_cidr=net_info.subnet_cidr,
-                local_ip=net_info.local_ip,
-                local_mac=net_info.local_mac,
-                duration=1.0,
+        if not bg_defenses.get("dns_tunneling"):
+            threats.extend(
+                ThreatDetector.check_dns_tunneling(
+                    interface=net_info.interface,
+                    subnet_cidr=net_info.subnet_cidr,
+                    local_ip=net_info.local_ip,
+                    local_mac=net_info.local_mac,
+                    duration=1.0,
+                )
             )
-        )
 
         # k) DHCP Starvation & Pool Exhaustion Guard
-        threats.extend(
-            ThreatDetector.check_dhcp_starvation(
-                interface=net_info.interface,
-                duration=1.0,
+        if not bg_defenses.get("dhcp_starvation"):
+            threats.extend(
+                ThreatDetector.check_dhcp_starvation(
+                    interface=net_info.interface,
+                    duration=1.0,
+                )
             )
-        )
 
         # l) Real-Time ARP Cache Poisoning & Gateway Masquerade Guard
-        trusted_map = {
-            ip: mac for ip, mac in active_devices.items() if mac and mac in whitelist
-        }
-        threats.extend(
-            ThreatDetector.check_realtime_arp_poisoning(
-                interface=net_info.interface,
-                gateway_ip=net_info.gateway_ip,
-                gateway_mac=net_info.gateway_mac,
-                trusted_ip_mac_map=trusted_map,
-                duration=1.0,
+        if not bg_defenses.get("arp_poison"):
+            trusted_map = {
+                ip: mac for ip, mac in active_devices.items() if mac and mac in whitelist
+            }
+            threats.extend(
+                ThreatDetector.check_realtime_arp_poisoning(
+                    interface=net_info.interface,
+                    gateway_ip=net_info.gateway_ip,
+                    gateway_mac=net_info.gateway_mac,
+                    trusted_ip_mac_map=trusted_map,
+                    duration=1.0,
+                )
             )
-        )
 
         inventory: List[Device] = []
         alien_devices: List[Device] = []

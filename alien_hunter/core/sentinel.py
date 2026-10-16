@@ -67,6 +67,7 @@ class SentinelWatchdog:
         self.web_port = self.cfg.web_port
 
         self.known_alien_macs: Set[str] = set()
+        self.known_audit_threats: Set[str] = set()
         self.honey_listener: Optional[HoneyPortListener] = None
         self.syn_detector: Optional[SynScanDetector] = None
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
@@ -296,6 +297,7 @@ class SentinelWatchdog:
                         interface=self.interface,
                         ai_engine=ai_engine,
                         custom_ports=self.custom_ports,
+                        active_background_defenses=self._active_defenses_dict(),
                     )
                     if self.sync_db:
                         self.config_mgr.sync_device_inventory(
@@ -345,6 +347,13 @@ class SentinelWatchdog:
                         for msg in msgs:
                             print(f"{Colors.BOLD}{Colors.RED}[!] {msg}{Colors.RESET}")
 
+                    new_audit_threats = [
+                        t for t in result.threats if t not in self.known_audit_threats
+                    ]
+                    for msg in new_audit_threats:
+                        print(f"{Colors.BOLD}{Colors.RED}[!] {msg}{Colors.RESET}")
+                        self.known_audit_threats.add(msg)
+
                     combined_threats = result.threats + [
                         msg for msgs in threat_groups.values() for msg in msgs
                     ]
@@ -362,7 +371,7 @@ class SentinelWatchdog:
                         a for a in result.alien_devices if a.mac not in self.known_alien_macs
                     ]
 
-                    has_live_threats = any(threat_groups.values())
+                    has_live_threats = any(threat_groups.values()) or bool(new_audit_threats)
                     if new_aliens or has_live_threats:
                         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
                         if new_aliens:
@@ -376,7 +385,9 @@ class SentinelWatchdog:
                                 self.known_alien_macs.add(a.mac)
 
                         # Dispatch to all active notification hooks
-                        dispatched = self.notifier.dispatch(new_aliens, combined_threats)
+                        dispatched = self.notifier.dispatch(
+                            new_aliens, combined_threats, audit_result=result
+                        )
                         if dispatched:
                             success_hooks = [k for k, v in dispatched.items() if v]
                             if success_hooks:

@@ -197,7 +197,32 @@ class SentinelState:
     def _record_threat_event(self, threat_msg: str):
         """Maps threat message to appropriate security event type and severity."""
         low = threat_msg.lower()
-        if "honey-port" in low or "canary" in low:
+        is_critical = low.startswith("critical:")
+        if "honey-port" in low:
+            ev_type = "CANARY_TRIGGERED"
+            sev = "CRITICAL"
+            title = "Honey-Port Canary Tripped"
+        elif "doppelgänger" in low or "doppelganger" in low or "mac spoofing" in low or "stack masquerade" in low or "stack drift" in low:
+            ev_type = "DOPPELGANGER_DETECTED"
+            sev = "CRITICAL"
+            title = "Hardware Doppelgänger / MAC Spoofing Detected"
+        elif "out-of-subnet" in low or "phantom implant" in low:
+            ev_type = "PHANTOM_DEVICE_DETECTED"
+            sev = "CRITICAL" if is_critical else "WARN"
+            title = "Out-of-Subnet Phantom Device Detected"
+        elif "rogue dhcp" in low or "unauthorized dhcp" in low:
+            ev_type = "ROGUE_DHCP_DETECTED"
+            sev = "CRITICAL"
+            title = "Rogue DHCP Server Detected"
+        elif "cam table" in low or "broadcast storm" in low:
+            ev_type = "L2_STORM_DETECTED"
+            sev = "CRITICAL" if is_critical else "WARN"
+            title = "Layer-2 Flood / Storm Detected"
+        elif "llmnr" in low or "mdns poisoning" in low or "nbt-ns" in low:
+            ev_type = "NAME_POISONING_DETECTED"
+            sev = "CRITICAL"
+            title = "Name Resolution Poisoning Detected"
+        elif "canary" in low:
             ev_type = "CANARY_TRIGGERED"
             sev = "CRITICAL"
             title = "Honey-Port Canary Tripped"
@@ -213,7 +238,7 @@ class SentinelState:
             ev_type = "DHCP_STARVATION_DETECTED"
             sev = "CRITICAL"
             title = "DHCP Starvation Flood Detected"
-        elif "arp cache poisoning" in low or "arp poison" in low or "gateway masquerade" in low:
+        elif "arp cache poisoning" in low or "arp poison" in low or "gateway masquerade" in low or "arp spoofing" in low:
             ev_type = "ARP_POISON_DETECTED"
             sev = "CRITICAL"
             title = "ARP Cache Poisoning Detected"
@@ -223,11 +248,11 @@ class SentinelState:
             title = "ICMP Route Hijacking Detected"
         elif "port drift" in low:
             ev_type = "PORT_DRIFT"
-            sev = "WARN"
+            sev = "CRITICAL" if is_critical else "WARN"
             title = "Unexpected Port Drift Detected"
         else:
             ev_type = "SECURITY_THREAT"
-            sev = "WARN"
+            sev = "CRITICAL" if is_critical else "WARN"
             title = "Security Threat Alert"
 
         self.event_mgr.record(
@@ -270,7 +295,7 @@ class SentinelState:
             self.trusted_devices = trusted
 
     def update_whitelist_entry(self, mac: str, entry: Dict[str, Any]):
-        """Transfers a device from alien to trusted in real time after whitelisting."""
+        """Transfers a device from alien to trusted (or updates existing trusted entry) in real time."""
         mac_upper = mac.upper()
         name = entry.get("name", "Trusted Device")
         owner = entry.get("owner", "User")
@@ -289,16 +314,30 @@ class SentinelState:
 
             self.alien_devices = new_alien
 
+            existing_idx = None
+            for idx, tdev in enumerate(self.trusted_devices):
+                if tdev.get("mac", "").upper() == mac_upper:
+                    existing_idx = idx
+                    if not target_dev:
+                        target_dev = dict(tdev)
+                    break
+
             if target_dev:
                 target_dev["trusted"] = True
                 target_dev["is_alien"] = False
                 target_dev["name"] = name
                 target_dev["friendly_name"] = name
+                target_dev["display_name"] = name
                 target_dev["owner"] = owner
                 target_dev["device_type"] = device_type
                 if not primary_ip:
                     primary_ip = target_dev.get("ip", "")
-                self.trusted_devices.append(target_dev)
+                elif not target_dev.get("ip"):
+                    target_dev["ip"] = primary_ip
+                if existing_idx is not None:
+                    self.trusted_devices[existing_idx] = target_dev
+                else:
+                    self.trusted_devices.append(target_dev)
             else:
                 self.trusted_devices.append(
                     {
@@ -307,7 +346,7 @@ class SentinelState:
                         "name": name,
                         "friendly_name": name,
                         "display_name": name,
-                        "hostname": "Unknown",
+                        "hostname": entry.get("hostname", "Unknown"),
                         "owner": owner,
                         "device_type": device_type,
                         "trusted": True,
@@ -317,6 +356,7 @@ class SentinelState:
                         "services": entry.get("services", []),
                         "vendor": entry.get("vendor", "N/A"),
                         "last_seen": entry.get("last_seen", ""),
+                        "aliases": entry.get("aliases", []),
                     }
                 )
 
@@ -404,6 +444,8 @@ class SentinelState:
             "status": getattr(dev, "status", "Online / Active"),
             "trusted": getattr(dev, "trusted", False),
             "is_alien": getattr(dev, "is_alien", False),
+            "is_randomized": getattr(dev, "is_randomized", False),
+            "is_apple": getattr(dev, "is_apple", False),
             "open_ports": getattr(dev, "open_ports", []),
             "ports": getattr(dev, "open_ports", []),
             "threats": getattr(dev, "threats", []),
@@ -413,6 +455,11 @@ class SentinelState:
             "aliases": getattr(dev, "aliases", []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
             "last_seen": getattr(dev, "last_seen", None) or None,
+            "dhcp_fingerprint": getattr(dev, "dhcp_fingerprint", None),
+            "dhcp_params": getattr(dev, "dhcp_params", None),
+            "ssdp_fingerprint": getattr(dev, "ssdp_fingerprint", None),
+            "tcp_syn_fingerprint": getattr(dev, "tcp_syn_fingerprint", None),
+            "observed_ttl": getattr(dev, "observed_ttl", None),
             "ai_assessment": (
                 getattr(dev, "ai_assessment").to_dict()
                 if getattr(dev, "ai_assessment", None) and hasattr(getattr(dev, "ai_assessment"), "to_dict")
