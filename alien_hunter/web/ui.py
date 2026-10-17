@@ -492,6 +492,11 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
 <div class="toast" id="toastMsg"></div>
 
 <script>
+// Derive base URL for relative subpath support (e.g. /alien-hunter or /)
+const API_BASE = window.location.pathname.endsWith('/') 
+  ? window.location.pathname.slice(0, -1) 
+  : window.location.pathname.replace(/\/index\.html$/, '');
+
 let pollTimer = null;
 let cachedTrusted = [];
 let cachedAlien = [];
@@ -502,15 +507,15 @@ let scanPollInterval = null;
 async function fetchData() {
   try {
     const [resStatus, resDevices, resEvents] = await Promise.all([
-      fetch('/api/status').then(r => {
+      fetch(`${API_BASE}/api/status`).then(r => {
         if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
         return r.json();
       }),
-      fetch('/api/devices').then(r => {
+      fetch(`${API_BASE}/api/devices`).then(r => {
         if (!r.ok) throw new Error(`Devices HTTP ${r.status}`);
         return r.json();
       }),
-      fetch('/api/events?limit=100').then(r => {
+      fetch(`${API_BASE}/api/events?limit=100`).then(r => {
         if (!r.ok) throw new Error(`Events HTTP ${r.status}`);
         return r.json();
       })
@@ -1043,7 +1048,7 @@ async function submitWhitelist(e) {
   const device_type = document.getElementById('formType').value;
 
   try {
-    const res = await fetch('/api/whitelist', {
+    const res = await fetch(`${API_BASE}/api/whitelist`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mac, primary_ip: ip, name, owner, device_type })
@@ -1165,7 +1170,7 @@ async function triggerManualScan(deep = true) {
   showToast(deep ? 'Initiating manual deep scan with AI analysis...' : 'Initiating manual scan...');
 
   try {
-    const res = await fetch(`/api/scan?deep=${deep ? 'true' : 'false'}&ai=true`, {
+    const res = await fetch(`${API_BASE}/api/scan?deep=${deep ? 'true' : 'false'}&ai=true`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deep: deep, ai: true })
@@ -1196,7 +1201,7 @@ function pollScanProgress() {
   if (scanPollInterval) clearInterval(scanPollInterval);
   scanPollInterval = setInterval(async () => {
     try {
-      const res = await fetch('/api/status');
+      const res = await fetch(`${API_BASE}/api/status`);
       if (res.ok) {
         const status = await res.json();
         if (!status.is_scanning) {
