@@ -172,6 +172,7 @@ class SentinelConfig:
     web_enabled: bool = False
     web_host: str = "0.0.0.0"
     web_port: int = 8080
+    web_auth: Optional[Dict[str, Any]] = None
     honey_ports: Optional[List[int]] = None
     syn_scan_enabled: bool = True
     dns_tunneling_enabled: bool = True
@@ -202,6 +203,7 @@ class SentinelConfig:
             "web_enabled": bool(web.get("enabled", False)),
             "web_host": str(web.get("host", "0.0.0.0")),
             "web_port": int(web.get("port", 8080)),
+            "web_auth": web.get("auth"),
             "honey_ports": defenses.get("honey_ports", [5555, 2323, 8888]) if honey_enabled else None,
             "syn_scan_enabled": bool(defenses.get("syn_scan_enabled", True)),
             "dns_tunneling_enabled": bool(defenses.get("dns_tunneling_enabled", True)),

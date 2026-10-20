@@ -19,6 +19,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .state import SentinelState
 from .ui import DASHBOARD_HTML
+from .auth import WebAuthenticator
 from ..config import ConfigManager
 from ..logging_setup import get_logger
 from ..models import estimate_initial_ttl
@@ -51,7 +52,7 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             log.debug("Client closed socket during JSON response write")
 
-    def _send_html_response(self, status_code: int, html_str: str):
+    def _send_html_response(self, status_code: int, html_str: str, headers: Optional[dict] = None):
         body = html_str.encode("utf-8")
         try:
             self.send_response(status_code)
@@ -60,29 +61,90 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
+            if headers:
+                for k, v in headers.items():
+                    self.send_header(k, v)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
             log.debug("Client closed socket during HTML response write")
 
+    def _get_client_ip(self) -> str:
+        """Resolves client IP, honoring trusted proxy headers for local connections."""
+        client_ip = self.client_address[0] if self.client_address else "127.0.0.1"
+        if client_ip in ("127.0.0.1", "::1"):
+            forwarded = self.headers.get("X-Forwarded-For")
+            if forwarded:
+                client_ip = forwarded.split(",")[0].strip()
+            else:
+                real_ip = self.headers.get("X-Real-IP")
+                if real_ip:
+                    client_ip = real_ip.strip()
+        return client_ip
+
+    def _is_request_authorized(self) -> bool:
+        """Validates session token or loopback CLI bypass."""
+        auth: Optional[WebAuthenticator] = getattr(self.server, "authenticator", None)
+        if not auth or not auth.enabled:
+            return True
+
+        # Check local CLI bypass (direct loopback connection with no proxy header)
+        raw_client = self.client_address[0] if self.client_address else ""
+        if raw_client in ("127.0.0.1", "::1") and not self.headers.get("X-Forwarded-For") and not self.headers.get("X-Real-IP"):
+            user_agent = self.headers.get("User-Agent", "")
+            if "AlienHunterCLI" in user_agent:
+                return True
+
+        # Check session cookie
+        cookie_header = self.headers.get("Cookie", "")
+        if "ah_session=" in cookie_header:
+            match = re.search(r"ah_session=([^;]+)", cookie_header)
+            if match:
+                token = match.group(1).strip()
+                username = auth.session_manager.validate_session(token)
+                if username:
+                    return True
+
+        return False
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
+        auth: Optional[WebAuthenticator] = getattr(self.server, "authenticator", None)
+
         if path in ("", "/index.html"):
             self._send_html_response(200, DASHBOARD_HTML)
+        elif path == "/api/auth/status":
+            is_auth = self._is_request_authorized()
+            self._send_json_response(200, {
+                "auth_enabled": bool(auth and auth.enabled),
+                "auth_required": bool(auth and auth.enabled),
+                "is_authenticated": is_auth,
+                "authenticated": is_auth,
+                "username": auth.username if (auth and is_auth) else None,
+            })
         elif path == "/api/status":
+            if not self._is_request_authorized():
+                self._send_json_response(401, {"error": "Authentication required", "auth_required": True})
+                return
             state: Optional[SentinelState] = getattr(self.server, "state", None)
             if state:
                 self._send_json_response(200, state.get_status_summary())
             else:
                 self._send_json_response(503, {"error": "State unavailable"})
         elif path == "/api/devices":
+            if not self._is_request_authorized():
+                self._send_json_response(401, {"error": "Authentication required", "auth_required": True})
+                return
             state: Optional[SentinelState] = getattr(self.server, "state", None)
             if state:
                 self._send_json_response(200, state.get_devices_payload())
             else:
                 self._send_json_response(503, {"error": "State unavailable"})
         elif path == "/api/events":
+            if not self._is_request_authorized():
+                self._send_json_response(401, {"error": "Authentication required", "auth_required": True})
+                return
             state: Optional[SentinelState] = getattr(self.server, "state", None)
             if state:
                 query = parse_qs(parsed.query)
@@ -128,12 +190,121 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/")
-        if path == "/api/whitelist":
+        if path == "/api/auth/login":
+            self._handle_login_post()
+        elif path == "/api/auth/logout":
+            self._handle_logout_post()
+        elif path == "/api/whitelist":
+            if not self._is_request_authorized():
+                self._send_json_response(401, {"error": "Authentication required", "auth_required": True})
+                return
             self._handle_whitelist_post()
         elif path == "/api/scan":
+            if not self._is_request_authorized():
+                self._send_json_response(401, {"error": "Authentication required", "auth_required": True})
+                return
             self._handle_scan_post(parsed)
         else:
             self._send_json_response(404, {"error": "Not Found"})
+
+    def _handle_login_post(self):
+        auth: Optional[WebAuthenticator] = getattr(self.server, "authenticator", None)
+        if not auth or not auth.enabled:
+            self._send_json_response(200, {"success": True, "message": "Authentication disabled"})
+            return
+
+        client_ip = self._get_client_ip()
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (ValueError, TypeError):
+            self._send_json_response(400, {"success": False, "message": "Invalid Content-Length header"})
+            return
+
+        if content_length <= 0 or content_length > 4096:
+            self._send_json_response(400, {"success": False, "message": "Invalid request body size"})
+            return
+
+        try:
+            raw_body = self.rfile.read(content_length).decode("utf-8")
+            payload = json.loads(raw_body)
+        except Exception:
+            self._send_json_response(400, {"success": False, "message": "Invalid JSON payload"})
+            return
+
+        username = str(payload.get("username", "")).strip()
+        password = str(payload.get("password", "")).strip()
+
+        success, token, err_msg, retry_after = auth.authenticate(username, password, client_ip)
+
+        if not success:
+            state: Optional[SentinelState] = getattr(self.server, "state", None)
+            if state and hasattr(state, "event_mgr"):
+                state.event_mgr.record(
+                    event_type="AUTH_FAILURE",
+                    severity="WARN",
+                    title="Web Login Failure",
+                    description=f"Failed login attempt for user '{username}' from IP {client_ip}",
+                    ip=client_ip,
+                )
+
+            status_code = 429 if retry_after > 0 else 401
+            body = json.dumps({"success": False, "message": err_msg or "Invalid credentials", "retry_after": retry_after}).encode("utf-8")
+            try:
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                if retry_after > 0:
+                    self.send_header("Retry-After", str(retry_after))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return
+
+        # Success - set cookie
+        is_https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        cookie_parts = [
+            f"ah_session={token}",
+            "Path=/",
+            "HttpOnly",
+            "SameSite=Strict",
+            f"Max-Age={auth.session_manager.ttl_seconds}",
+        ]
+        if is_https:
+            cookie_parts.append("Secure")
+        cookie_header = "; ".join(cookie_parts)
+
+        body = json.dumps({"success": True, "message": "Authenticated successfully"}).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", cookie_header)
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
+
+    def _handle_logout_post(self):
+        auth: Optional[WebAuthenticator] = getattr(self.server, "authenticator", None)
+        if auth and auth.enabled:
+            cookie_header = self.headers.get("Cookie", "")
+            if "ah_session=" in cookie_header:
+                match = re.search(r"ah_session=([^;]+)", cookie_header)
+                if match:
+                    auth.session_manager.revoke_session(match.group(1).strip())
+
+        cookie_header = "ah_session=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly; SameSite=Strict"
+        body = json.dumps({"success": True, "message": "Logged out successfully"}).encode("utf-8")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Set-Cookie", cookie_header)
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception:
+            pass
 
     def _handle_scan_post(self, parsed):
         scan_trigger = getattr(self.server, "scan_trigger", None)
@@ -318,6 +489,8 @@ class LightweightWebServer:
         host: str = "0.0.0.0",
         port: int = 8080,
         scan_trigger: Optional[Any] = None,
+        auth_config: Optional[dict] = None,
+        auth_log_path: Optional[str] = None,
     ):
         self.state = state
         self.config_mgr = config_mgr
@@ -325,6 +498,7 @@ class LightweightWebServer:
         self.host = host
         self.port = port
         self.scan_trigger = scan_trigger
+        self.authenticator = WebAuthenticator(auth_config=auth_config, auth_log_path=auth_log_path)
         self.server: Optional[AlienHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 
@@ -337,6 +511,7 @@ class LightweightWebServer:
             self.server.config_mgr = self.config_mgr  # type: ignore
             self.server.whitelist_path = self.whitelist_path  # type: ignore
             self.server.scan_trigger = self.scan_trigger  # type: ignore
+            self.server.authenticator = self.authenticator  # type: ignore
 
             self.thread = threading.Thread(
                 target=self.server.serve_forever,

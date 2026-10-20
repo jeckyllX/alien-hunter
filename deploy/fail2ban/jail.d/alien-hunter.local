@@ -1,0 +1,12 @@
+# Fail2ban jail configuration for Alien Hunter Web Dashboard (port 8080)
+# Monitors systemd journal for [AUTH_FAILURE] log lines from alien-hunter.service
+
+[alien-hunter]
+enabled = true
+port = 8080
+filter = alien-hunter
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=alien-hunter.service
+maxretry = 5
+findtime = 600
+bantime = 3600

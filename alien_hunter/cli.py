@@ -160,6 +160,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--force-sync", action="store_true", help="Force signature synchronization bypassing 24h interval check")
     parser.add_argument("--set-ai-provider", type=str, metavar="NAME", help="Switch active AI provider in config.json (e.g. ollama, openrouter, groq)")
     parser.add_argument("--ai-provider", type=str, metavar="NAME", help="Temporarily override AI provider for this run")
+    parser.add_argument("--set-web-password", action="store_true", help="Set or update the bcrypt/PBKDF2 web dashboard authentication password")
+    parser.add_argument("--web-user", type=str, default="admin", help="Username for web authentication (default: admin)")
+    parser.add_argument("--disable-web-auth", action="store_true", help="Disable web dashboard authentication")
     parser.add_argument("--no-delegate", action="store_true", help="Bypass delegation to running background Sentinel daemon")
     return parser
 
@@ -171,7 +174,7 @@ def main():
 
     configure_logging(debug=args.debug)
 
-    need_root = not (args.test_notify or args.test_ai or args.update_signatures or args.set_ai_provider)
+    need_root = not (args.test_notify or args.test_ai or args.update_signatures or args.set_ai_provider or args.set_web_password or args.disable_web_auth)
     if need_root and not args.no_delegate and not args.watch:
         try:
             cfg_mgr = ConfigManager()
@@ -188,6 +191,81 @@ def main():
 
     if need_root:
         ensure_root()
+
+    if args.set_web_password:
+        import getpass
+        from .web.auth import PasswordHasher, HAS_BCRYPT
+
+        user = (args.web_user or "admin").strip()
+        print(f"{Colors.CYAN}[*] Setting web authentication password for user '{user}'...{Colors.RESET}")
+        try:
+            pw1 = getpass.getpass("Enter new web password: ")
+            if not pw1:
+                print(f"{Colors.RED}[-] Password cannot be empty.{Colors.RESET}")
+                sys.exit(1)
+            pw2 = getpass.getpass("Confirm new web password: ")
+            if pw1 != pw2:
+                print(f"{Colors.RED}[-] Passwords do not match.{Colors.RESET}")
+                sys.exit(1)
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            sys.exit(1)
+
+        hashed = PasswordHasher.hash_password(pw1)
+        engine_label = "bcrypt" if HAS_BCRYPT else "PBKDF2-HMAC-SHA256"
+
+        config_mgr = ConfigManager()
+        config_path = config_mgr.resolve_path("config.json", args.config_file)
+        config = config_mgr.load_config(config_path)
+        if "web_ui" not in config or not isinstance(config["web_ui"], dict):
+            config["web_ui"] = {"enabled": True, "host": "0.0.0.0", "port": 8080}
+
+        config["web_ui"]["auth"] = {
+            "enabled": True,
+            "username": user,
+            "password_hash": hashed,
+            "max_attempts": 5,
+            "window_seconds": 600,
+            "base_delay_seconds": 2.0,
+            "max_lockout_seconds": 1800,
+            "session_ttl_seconds": 86400,
+        }
+
+        if not config_mgr.save_config(config, config_path):
+            print(f"{Colors.RED}[-] Failed to update {config_path}. Check file permissions.{Colors.RESET}")
+            sys.exit(1)
+
+        print(f"{Colors.GREEN}[+] Web authentication enabled ({engine_label}) for user '{user}' in {config_path}{Colors.RESET}")
+
+        import subprocess
+        try:
+            res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
+            if res.returncode == 0:
+                print(f"{Colors.CYAN}[*] Restarting alien-hunter.service...{Colors.RESET}")
+                subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+        except Exception:
+            pass
+        sys.exit(0)
+
+    if args.disable_web_auth:
+        config_mgr = ConfigManager()
+        config_path = config_mgr.resolve_path("config.json", args.config_file)
+        config = config_mgr.load_config(config_path)
+        if "web_ui" in config and isinstance(config["web_ui"], dict) and "auth" in config["web_ui"]:
+            config["web_ui"]["auth"]["enabled"] = False
+            config_mgr.save_config(config, config_path)
+            print(f"{Colors.GREEN}[+] Web authentication disabled in {config_path}{Colors.RESET}")
+            import subprocess
+            try:
+                res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
+                if res.returncode == 0:
+                    subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+            except Exception:
+                pass
+        else:
+            print("Web authentication was not enabled.")
+        sys.exit(0)
 
     if args.set_ai_provider:
         target_provider = args.set_ai_provider.strip().lower()

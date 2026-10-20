@@ -5,7 +5,17 @@
   "web_ui": {
     "enabled": false,
     "host": "0.0.0.0",
-    "port": 8080
+    "port": 8080,
+    "auth": {
+      "enabled": false,
+      "username": "admin",
+      "password_hash": "",
+      "max_attempts": 5,
+      "window_seconds": 600,
+      "base_delay_seconds": 2.0,
+      "max_lockout_seconds": 1800.0,
+      "session_ttl_seconds": 86400
+    }
   },
   "defenses": {
     "llmnr_canary_enabled": true,
