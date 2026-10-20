@@ -215,6 +215,7 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
       </select>
       <button onclick="fetchData()">🔄 Refresh</button>
       <button class="btn-primary" id="btnDeepScan" onclick="triggerManualScan(true)">🔍 Deep Scan</button>
+      <button id="btnLogout" style="display: none;" onclick="logout()">🔒 Logout</button>
     </div>
   </header>
 
@@ -489,13 +490,40 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
   </div>
 </div>
 
+<!-- Login Modal -->
+<div class="modal-overlay" id="loginModal" style="display: none; z-index: 100;">
+  <div class="modal" style="max-width: 380px;">
+    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+      <span style="font-size: 1.5rem;">🔒</span>
+      <div>
+        <h3 style="margin: 0; font-size: 1.1rem; color: var(--text-main);">Authentication Required</h3>
+        <div style="font-size: 0.78rem; color: var(--text-dim);">Alien Hunter Dashboard</div>
+      </div>
+    </div>
+    <form id="loginForm" onsubmit="submitLogin(event)">
+      <div id="loginError" style="display: none; padding: 8px 12px; border-radius: 4px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; font-size: 0.8rem; margin-bottom: 12px;"></div>
+      <div class="form-group">
+        <label for="loginUser">Username</label>
+        <input type="text" id="loginUser" required autocomplete="username" placeholder="admin">
+      </div>
+      <div class="form-group">
+        <label for="loginPass">Password</label>
+        <input type="password" id="loginPass" required autocomplete="current-password" placeholder="••••••••">
+      </div>
+      <div class="modal-actions" style="margin-top: 18px;">
+        <button type="submit" class="btn-primary" id="btnLoginSubmit" style="width: 100%;">Sign In</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <div class="toast" id="toastMsg"></div>
 
 <script>
 // Derive base URL for relative subpath support (e.g. /alien-hunter or /)
 const API_BASE = window.location.pathname.endsWith('/') 
   ? window.location.pathname.slice(0, -1) 
-  : window.location.pathname.replace(/\/index\.html$/, '');
+  : window.location.pathname.replace(/[/]index[.]html$/, '');
 
 let pollTimer = null;
 let cachedTrusted = [];
@@ -506,20 +534,42 @@ let scanPollInterval = null;
 
 async function fetchData() {
   try {
+    // 1. Check auth status first
+    const authStatus = await fetch(`${API_BASE}/api/auth/status`).then(r => r.json()).catch(() => ({ auth_enabled: false }));
+    const logoutBtn = document.getElementById('btnLogout');
+    if (authStatus && authStatus.auth_enabled) {
+      if (!authStatus.is_authenticated) {
+        showLoginModal();
+        return;
+      }
+      if (logoutBtn) logoutBtn.style.display = 'inline-block';
+    } else {
+      if (logoutBtn) logoutBtn.style.display = 'none';
+      hideLoginModal();
+    }
+
     const [resStatus, resDevices, resEvents] = await Promise.all([
       fetch(`${API_BASE}/api/status`).then(r => {
+        if (r.status === 401) {
+          showLoginModal();
+          throw new Error('401 Unauthorized');
+        }
         if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
         return r.json();
       }),
       fetch(`${API_BASE}/api/devices`).then(r => {
+        if (r.status === 401) throw new Error('401 Unauthorized');
         if (!r.ok) throw new Error(`Devices HTTP ${r.status}`);
         return r.json();
       }),
       fetch(`${API_BASE}/api/events?limit=100`).then(r => {
+        if (r.status === 401) throw new Error('401 Unauthorized');
         if (!r.ok) throw new Error(`Events HTTP ${r.status}`);
         return r.json();
       })
     ]);
+
+    hideLoginModal();
 
     // Update daemon status indicator
     const pill = document.getElementById('statusPill');
@@ -1233,6 +1283,72 @@ function updatePolling() {
 
 function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function showLoginModal() {
+  const modal = document.getElementById('loginModal');
+  if (modal) modal.style.display = 'flex';
+}
+
+function hideLoginModal() {
+  const modal = document.getElementById('loginModal');
+  if (modal) modal.style.display = 'none';
+  const err = document.getElementById('loginError');
+  if (err) err.style.display = 'none';
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  const username = (document.getElementById('loginUser').value || '').trim();
+  const password = document.getElementById('loginPass').value || '';
+  const errEl = document.getElementById('loginError');
+  const btn = document.getElementById('btnLoginSubmit');
+
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Authenticating...';
+  }
+  if (errEl) errEl.style.display = 'none';
+
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (res.ok && data.success) {
+      document.getElementById('loginPass').value = '';
+      hideLoginModal();
+      showToast('✔ Authenticated successfully');
+      fetchData();
+    } else {
+      if (errEl) {
+        errEl.textContent = data.message || 'Authentication failed';
+        errEl.style.display = 'block';
+      }
+      showToast(`✘ Login failed: ${data.message || 'Error'}`);
+    }
+  } catch (err) {
+    if (errEl) {
+      errEl.textContent = `Connection error: ${err.message}`;
+      errEl.style.display = 'block';
+    }
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Sign In';
+    }
+  }
+}
+
+async function logout() {
+  try {
+    await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
+  } catch (e) {}
+  showToast('Logged out');
+  showLoginModal();
 }
 
 // Initial fetch & start timer

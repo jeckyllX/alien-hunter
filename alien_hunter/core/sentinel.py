@@ -65,6 +65,7 @@ class SentinelWatchdog:
         self.web_enabled = self.cfg.web_enabled
         self.web_host = self.cfg.web_host
         self.web_port = self.cfg.web_port
+        self.web_auth = self.cfg.web_auth
 
         self.known_alien_macs: Set[str] = set()
         self.known_audit_threats: Set[str] = set()
@@ -248,6 +249,7 @@ class SentinelWatchdog:
                 host=self.web_host,
                 port=self.web_port,
                 scan_trigger=self.trigger_scan,
+                auth_config=self.web_auth,
             )
             if self.web_server.start():
                 print(f"{Colors.GREEN}[+] Web Dashboard active at http://{self.web_host}:{self.web_port}{Colors.RESET}")

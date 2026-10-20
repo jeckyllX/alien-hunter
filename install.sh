@@ -20,6 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_FILE="/etc/systemd/system/alien-hunter.service"
 BIN_LINK="/usr/local/bin/alien-hunter"
 PYTHON_BIN="$(command -v python3 || echo /usr/bin/python3)"
+FAIL2BAN_FILTER_SRC="$SCRIPT_DIR/deploy/fail2ban/filter.d/alien-hunter.conf"
+FAIL2BAN_JAIL_SRC="$SCRIPT_DIR/deploy/fail2ban/jail.d/alien-hunter.local"
+FAIL2BAN_FILTER_DEST="/etc/fail2ban/filter.d/alien-hunter.conf"
+FAIL2BAN_JAIL_DEST="/etc/fail2ban/jail.d/alien-hunter.local"
 
 print_banner() {
     echo -e "${BOLD}${CYAN}"
@@ -60,12 +64,20 @@ uninstall() {
         echo "[-] Removing $BIN_LINK..."
         rm -f "$BIN_LINK"
     fi
+    if [[ -f "$FAIL2BAN_FILTER_DEST" ]] || [[ -f "$FAIL2BAN_JAIL_DEST" ]]; then
+        echo "[-] Removing Fail2ban configurations..."
+        rm -f "$FAIL2BAN_FILTER_DEST" "$FAIL2BAN_JAIL_DEST"
+        if command -v fail2ban-client &>/dev/null && fail2ban-client ping &>/dev/null; then
+            echo "[-] Reloading Fail2ban rules..."
+            fail2ban-client reload &>/dev/null || true
+        fi
+    fi
     echo -e "${GREEN}[+] Uninstallation complete.${RESET}"
     exit 0
 }
 
 check_dependencies() {
-    echo -e "${CYAN}[1/4] Checking system dependencies...${RESET}"
+    echo -e "${CYAN}[1/5] Checking system dependencies...${RESET}"
 
     PYTHON_BIN="$(command -v python3 || echo /usr/bin/python3)"
     if ! command -v "$PYTHON_BIN" &>/dev/null; then
@@ -99,7 +111,7 @@ check_dependencies() {
 }
 
 setup_configs() {
-    echo -e "${CYAN}[2/4] Setting up configuration templates...${RESET}"
+    echo -e "${CYAN}[2/5] Setting up configuration templates...${RESET}"
 
     # Initialize known_devices.json if not present
     if [[ ! -f "$SCRIPT_DIR/known_devices.json" ]]; then
@@ -127,14 +139,14 @@ setup_configs() {
 }
 
 setup_cli_symlink() {
-    echo -e "${CYAN}[3/4] Creating global CLI symlink...${RESET}"
+    echo -e "${CYAN}[3/5] Creating global CLI symlink...${RESET}"
     chmod +x "$SCRIPT_DIR/alien_hunter.py"
     ln -sf "$SCRIPT_DIR/alien_hunter.py" "$BIN_LINK"
     echo -e "      ${GREEN}✔${RESET} Linked $BIN_LINK -> $SCRIPT_DIR/alien_hunter.py"
 }
 
 setup_systemd_service() {
-    echo -e "${CYAN}[4/4] Configuring background service...${RESET}"
+    echo -e "${CYAN}[4/5] Configuring background service...${RESET}"
 
     if ! command -v systemctl &>/dev/null || ! [ -d /run/systemd/system ]; then
         echo -e "      ${YELLOW}!${RESET} systemd init system not detected on this machine."
@@ -169,8 +181,66 @@ EOF
     systemctl daemon-reload
 }
 
+setup_fail2ban() {
+    echo -e "${CYAN}[5/5] Configuring Fail2ban integration...${RESET}"
+
+    local fail2ban_dir="/etc/fail2ban"
+    if [[ "$INSTALL_FAIL2BAN" == "true" ]] || [[ -d "$fail2ban_dir" ]]; then
+        if [[ ! -d "$fail2ban_dir" ]]; then
+            echo -e "      ${YELLOW}!${RESET} /etc/fail2ban directory not found. Creating..."
+            mkdir -p "$fail2ban_dir/filter.d" "$fail2ban_dir/jail.d"
+        fi
+
+        if [[ -f "$FAIL2BAN_FILTER_SRC" ]]; then
+            mkdir -p "/etc/fail2ban/filter.d"
+            cp "$FAIL2BAN_FILTER_SRC" "$FAIL2BAN_FILTER_DEST"
+            echo -e "      ${GREEN}✔${RESET} Installed $FAIL2BAN_FILTER_DEST"
+        fi
+
+        if [[ -f "$FAIL2BAN_JAIL_SRC" ]]; then
+            mkdir -p "/etc/fail2ban/jail.d"
+            cp "$FAIL2BAN_JAIL_SRC" "$FAIL2BAN_JAIL_DEST"
+            echo -e "      ${GREEN}✔${RESET} Installed $FAIL2BAN_JAIL_DEST"
+        fi
+
+        if command -v fail2ban-client &>/dev/null; then
+            if fail2ban-client ping &>/dev/null; then
+                echo -e "      ${CYAN}[*] Reloading Fail2ban rules...${RESET}"
+                fail2ban-client reload &>/dev/null || true
+                echo -e "      ${GREEN}✔${RESET} Fail2ban reloaded successfully."
+            else
+                echo -e "      ${CYAN}ℹ${RESET} Fail2ban service is not currently running. Rules will apply upon start."
+            fi
+        else
+            echo -e "      ${CYAN}ℹ${RESET} fail2ban-client not installed; configuration files deployed."
+        fi
+    else
+        echo -e "      ${CYAN}ℹ${RESET} Fail2ban not detected in /etc/fail2ban (pass --fail2ban to force install). Skipping."
+    fi
+}
+
 main() {
-    if [[ "$1" == "--uninstall" ]]; then
+    local install_fail2ban=false
+    local do_uninstall=false
+
+    for arg in "$@"; do
+        case "$arg" in
+            --uninstall)
+                do_uninstall=true
+                ;;
+            --fail2ban)
+                install_fail2ban=true
+                ;;
+            -h|--help)
+                echo "Usage: sudo ./install.sh [--fail2ban] [--uninstall]"
+                exit 0
+                ;;
+        esac
+    done
+
+    INSTALL_FAIL2BAN="$install_fail2ban"
+
+    if [[ "$do_uninstall" == "true" ]]; then
         check_root "$@"
         uninstall
     fi
@@ -184,6 +254,7 @@ main() {
     setup_configs
     setup_cli_symlink
     setup_systemd_service
+    setup_fail2ban
 
     echo -e "\n${BOLD}${GREEN}========================================================================${RESET}"
     echo -e "${BOLD}${GREEN}                        Installation Complete                           ${RESET}"
