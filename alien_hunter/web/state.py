@@ -4,6 +4,8 @@ Maintains live daemon state, defense statuses, and discovered device inventories
 with thread-safe access and zero disk I/O.
 """
 
+import ipaddress
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Set
@@ -36,6 +38,88 @@ class SentinelState:
     def set_scanning(self, scanning: bool = True):
         with self._lock:
             self.is_scanning = scanning
+
+    @staticmethod
+    def _ip_rank(ip_str: str, subnet_cidr: Optional[str] = None) -> int:
+        if not ip_str or not isinstance(ip_str, str):
+            return -1
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            if addr.version == 4:
+                if subnet_cidr:
+                    try:
+                        if addr in ipaddress.ip_network(subnet_cidr, strict=False):
+                            return 5
+                    except ValueError:
+                        pass
+                if addr.is_private:
+                    return 4
+                return 3
+            elif addr.version == 6:
+                if not addr.is_link_local:
+                    return 2
+                return 1
+        except ValueError:
+            pass
+        return 0
+
+    @classmethod
+    def _merge_state_device_dict(cls, existing: Dict[str, Any], incoming: Dict[str, Any], subnet_cidr: Optional[str] = None) -> None:
+        """Merges telemetry from multiple entries sharing the same hardware MAC."""
+        inc_ip = incoming.get("ip") or incoming.get("primary_ip") or ""
+        cur_ip = existing.get("ip") or existing.get("primary_ip") or ""
+
+        aliases: List[str] = list(existing.get("aliases", []))
+        if cls._ip_rank(inc_ip, subnet_cidr) > cls._ip_rank(cur_ip, subnet_cidr):
+            if cur_ip and cur_ip != inc_ip and cur_ip not in aliases:
+                aliases.append(cur_ip)
+            existing["ip"] = inc_ip
+            existing["primary_ip"] = inc_ip
+        else:
+            if inc_ip and inc_ip != cur_ip and inc_ip not in aliases:
+                aliases.append(inc_ip)
+
+        for a in incoming.get("aliases", []):
+            if a and a != existing.get("ip") and a not in aliases:
+                aliases.append(a)
+        existing["aliases"] = aliases
+
+        # Status
+        status_ranks = {"Local Machine": 3, "Online / Active": 2, "Offline / Asleep": 1, "Sleeping / Inactive Lease": 1}
+        if status_ranks.get(incoming.get("status", ""), 0) > status_ranks.get(existing.get("status", ""), 0):
+            existing["status"] = incoming.get("status")
+
+        # Ports
+        e_ports = list(existing.get("ports", [])) or list(existing.get("open_ports", []))
+        i_ports = list(incoming.get("ports", [])) or list(incoming.get("open_ports", []))
+        merged_ports = list(dict.fromkeys(e_ports + i_ports))
+        def _port_key(p: Any) -> int:
+            try:
+                return int(str(p).split("/")[0])
+            except (ValueError, IndexError):
+                return 99999
+        merged_ports.sort(key=_port_key)
+        existing["ports"] = merged_ports
+        existing["open_ports"] = merged_ports
+
+        # Services
+        e_serv = list(existing.get("services", [])) or list(existing.get("mdns_services", []))
+        i_serv = list(incoming.get("services", [])) or list(incoming.get("mdns_services", []))
+        existing["services"] = list(dict.fromkeys(e_serv + i_serv))
+        existing["mdns_services"] = existing["services"]
+
+        # Discovery methods
+        e_m = [m.strip() for m in str(existing.get("discovery_method", "")).split(",") if m.strip()]
+        i_m = [m.strip() for m in str(incoming.get("discovery_method", "")).split(",") if m.strip()]
+        existing["discovery_method"] = ", ".join(list(dict.fromkeys(e_m + i_m)))
+
+        # Notes & Threats
+        existing["notes"] = list(dict.fromkeys(list(existing.get("notes", [])) + list(incoming.get("notes", []))))
+        existing["threats"] = list(dict.fromkeys(list(existing.get("threats", [])) + list(incoming.get("threats", []))))
+
+        # Last seen
+        if incoming.get("last_seen") and (not existing.get("last_seen") or incoming["last_seen"] > existing["last_seen"]):
+            existing["last_seen"] = incoming["last_seen"]
 
     def update_audit(
         self,
@@ -87,17 +171,33 @@ class SentinelState:
             if len(self._logged_threats) > 1000:
                 self._logged_threats = set(list(self._logged_threats)[-500:])
 
-            trusted: List[Dict[str, Any]] = []
-            alien: List[Dict[str, Any]] = []
-
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            existing_trusted = {d.get("mac", "").upper(): dict(d) for d in self.trusted_devices if d.get("mac")}
-            existing_alien = {d.get("mac", "").upper(): dict(d) for d in self.alien_devices if d.get("mac")}
+            existing_trusted = {
+                d.get("mac", "").upper(): dict(d)
+                for d in self.trusted_devices
+                if d.get("mac") and not d.get("mac", "").startswith("N/A")
+            }
+            existing_alien = {
+                d.get("mac", "").upper(): dict(d)
+                for d in self.alien_devices
+                if d.get("mac") and not d.get("mac", "").startswith("N/A")
+            }
+
+            trusted_map: Dict[str, Dict[str, Any]] = {}
+            alien_map: Dict[str, Dict[str, Any]] = {}
+            unkeyed_trusted: List[Dict[str, Any]] = []
+            unkeyed_alien: List[Dict[str, Any]] = []
             seen_trusted_macs = set()
 
             for dev in devices:
                 dev_dict = self._device_to_dict(dev)
-                mac_upper = dev_dict.get("mac", "").upper()
+                mac_upper = dev_dict.get("mac", "").strip().upper()
+                is_hw_mac = bool(
+                    mac_upper
+                    and not mac_upper.startswith("N/A")
+                    and re.match(r"^([0-9A-FA-F]{2}[:-]){5}([0-9A-FA-F]{2})$", mac_upper)
+                )
+
                 if dev_dict.get("trusted"):
                     dev_status = getattr(dev, "status", "Online / Active")
                     if dev_status not in ("Online / Active", "Local Machine"):
@@ -109,6 +209,10 @@ class SentinelState:
                     else:
                         prev_last = existing_trusted.get(mac_upper, {}).get("last_seen")
                         dev_dict["last_seen"] = prev_last
+
+                    if is_hw_mac and mac_upper in trusted_map:
+                        self._merge_state_device_dict(trusted_map[mac_upper], dev_dict, self.network_info.get("subnet_cidr"))
+                        continue
 
                     if mac_upper in existing_trusted:
                         prev = existing_trusted[mac_upper]
@@ -126,6 +230,19 @@ class SentinelState:
                         if not dev_dict.get("ai_assessment") and prev.get("ai_assessment"):
                             dev_dict["ai_assessment"] = prev["ai_assessment"]
 
+                        prev_ip = prev.get("ip") or prev.get("primary_ip")
+                        if prev_ip and prev_ip != dev_dict.get("ip"):
+                            cur_rank = self._ip_rank(dev_dict.get("ip", ""), self.network_info.get("subnet_cidr"))
+                            prev_rank = self._ip_rank(prev_ip, self.network_info.get("subnet_cidr"))
+                            if prev_rank > cur_rank:
+                                demoted = dev_dict.get("ip")
+                                dev_dict["ip"] = prev_ip
+                                dev_dict["primary_ip"] = prev_ip
+                                if demoted:
+                                    aliases = dev_dict.setdefault("aliases", [])
+                                    if demoted not in aliases:
+                                        aliases.append(demoted)
+
                         # Check for offline -> online transition
                         if is_subsequent_scan and prev_status == "Offline / Asleep" and dev_status in ("Online / Active", "Local Machine"):
                             name = dev_dict.get("friendly_name") or dev_dict.get("name") or "Trusted Device"
@@ -140,14 +257,25 @@ class SentinelState:
                                 mac=mac_upper,
                             )
 
-                    trusted.append(dev_dict)
-                    seen_trusted_macs.add(mac_upper)
+                    if is_hw_mac:
+                        trusted_map[mac_upper] = dev_dict
+                        seen_trusted_macs.add(mac_upper)
+                    else:
+                        unkeyed_trusted.append(dev_dict)
                 else:
                     dev_dict["status"] = "Online / Active"
                     dev_dict["last_seen"] = now_iso
                     if not dev_dict.get("ai_assessment") and mac_upper in existing_alien and existing_alien[mac_upper].get("ai_assessment"):
                         dev_dict["ai_assessment"] = existing_alien[mac_upper]["ai_assessment"]
-                    alien.append(dev_dict)
+
+                    if is_hw_mac and mac_upper in alien_map:
+                        self._merge_state_device_dict(alien_map[mac_upper], dev_dict, self.network_info.get("subnet_cidr"))
+                        continue
+
+                    if is_hw_mac:
+                        alien_map[mac_upper] = dev_dict
+                    else:
+                        unkeyed_alien.append(dev_dict)
 
                     # Log newly detected alien host
                     if mac_upper and mac_upper not in self._known_alien_macs:
@@ -175,7 +303,7 @@ class SentinelState:
                     prev_status = prev.get("status")
                     unseen_dev = dict(prev)
                     unseen_dev["status"] = "Offline / Asleep"
-                    trusted.append(unseen_dev)
+                    trusted_map[mac_upper] = unseen_dev
 
                     # Check for online -> offline transition
                     if is_subsequent_scan and prev_status in ("Online / Active", "Local Machine"):
@@ -191,8 +319,8 @@ class SentinelState:
                             mac=mac_upper,
                         )
 
-            self.trusted_devices = trusted
-            self.alien_devices = alien
+            self.trusted_devices = list(trusted_map.values()) + unkeyed_trusted
+            self.alien_devices = list(alien_map.values()) + unkeyed_alien
 
     def _record_threat_event(self, threat_msg: str):
         """Maps threat message to appropriate security event type and severity."""

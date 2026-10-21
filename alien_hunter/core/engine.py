@@ -4,7 +4,9 @@ Coordinates network context resolution, multi-layered device discovery,
 vendor resolution, Apple heuristics, port auditing, and threat detection.
 """
 
+import ipaddress
 import json
+import re
 import subprocess
 import time
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -182,6 +184,130 @@ class DiscoveryEngine:
                     break
 
         return mac
+
+    @staticmethod
+    def _is_valid_hardware_mac(mac: Optional[str]) -> bool:
+        if not mac or not isinstance(mac, str):
+            return False
+        clean = mac.strip().upper()
+        if clean.startswith("N/A") or clean in ("00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"):
+            return False
+        return bool(re.match(r"^([0-9A-FA-F]{2}[:-]){5}([0-9A-FA-F]{2})$", clean))
+
+    @staticmethod
+    def _ip_rank(
+        ip_str: str,
+        subnet_cidr: Optional[str] = None,
+        configured_primary: Optional[str] = None,
+    ) -> int:
+        """Ranks candidate IPs so configured primary and local subnet IPv4 addresses are preferred."""
+        if not ip_str or not isinstance(ip_str, str):
+            return -1
+        if configured_primary and ip_str == configured_primary:
+            return 10
+        try:
+            addr = ipaddress.ip_address(ip_str)
+            if addr.version == 4:
+                if subnet_cidr:
+                    try:
+                        if addr in ipaddress.ip_network(subnet_cidr, strict=False):
+                            return 5
+                    except ValueError:
+                        pass
+                if addr.is_private:
+                    return 4
+                return 3
+            elif addr.version == 6:
+                if not addr.is_link_local:
+                    return 2
+                return 1
+        except ValueError:
+            pass
+        return 0
+
+    @classmethod
+    def _merge_device_telemetry(
+        cls,
+        existing: Device,
+        incoming: Device,
+        subnet_cidr: Optional[str] = None,
+        configured_primary: Optional[str] = None,
+    ) -> None:
+        """Merges telemetry from multiple discovery protocols/IPs for the same hardware MAC."""
+        # 1. Primary IP vs Aliases resolution
+        e_rank = cls._ip_rank(existing.ip, subnet_cidr, configured_primary)
+        i_rank = cls._ip_rank(incoming.ip, subnet_cidr, configured_primary)
+        if i_rank > e_rank:
+            demoted_ip = existing.ip
+            existing.ip = incoming.ip
+            if demoted_ip and demoted_ip != existing.ip and demoted_ip not in existing.aliases:
+                existing.aliases.append(demoted_ip)
+        else:
+            if incoming.ip and incoming.ip != existing.ip and incoming.ip not in existing.aliases:
+                existing.aliases.append(incoming.ip)
+
+        for alias in incoming.aliases:
+            if alias and alias != existing.ip and alias not in existing.aliases:
+                existing.aliases.append(alias)
+
+        # 2. Status resolution (Local Machine > Online / Active > Sleeping / Inactive Lease)
+        status_ranks = {"Local Machine": 3, "Online / Active": 2, "Sleeping / Inactive Lease": 1}
+        if status_ranks.get(incoming.status, 0) > status_ranks.get(existing.status, 0):
+            existing.status = incoming.status
+
+        # 3. Trust and Alien status
+        if incoming.trusted:
+            existing.trusted = True
+        existing.is_alien = (not existing.trusted) and (existing.status in ("Online / Active", "Local Machine"))
+
+        # 4. Hostname / Friendly Name / Vendor
+        if existing.hostname in ("Unknown", "", "N/A") and incoming.hostname not in ("Unknown", "", "N/A"):
+            existing.hostname = incoming.hostname
+        if not existing.friendly_name and incoming.friendly_name:
+            existing.friendly_name = incoming.friendly_name
+        if existing.vendor in ("N/A", "Unknown", "Unknown Vendor") and incoming.vendor not in ("N/A", "Unknown", "Unknown Vendor"):
+            existing.vendor = incoming.vendor
+        elif "Randomized" in existing.vendor and "Randomized" not in incoming.vendor and incoming.vendor not in ("N/A", "Unknown"):
+            existing.vendor = incoming.vendor
+
+        # 5. Discovery Methods
+        e_methods = [m.strip() for m in existing.discovery_method.split(",") if m.strip()]
+        i_methods = [m.strip() for m in incoming.discovery_method.split(",") if m.strip()]
+        existing.discovery_method = ", ".join(list(dict.fromkeys(e_methods + i_methods)))
+
+        # 6. Open Ports
+        def _port_key(p: Any) -> int:
+            try:
+                return int(str(p).split("/")[0])
+            except (ValueError, IndexError):
+                return 99999
+        merged_ports = list(dict.fromkeys(existing.open_ports + incoming.open_ports))
+        merged_ports.sort(key=_port_key)
+        existing.open_ports = merged_ports
+
+        # 7. Metadata collections
+        existing.threats = list(dict.fromkeys(existing.threats + incoming.threats))
+        existing.notes = list(dict.fromkeys(existing.notes + incoming.notes))
+        existing.mdns_services = list(dict.fromkeys(existing.mdns_services + incoming.mdns_services))
+        existing.ws_types = list(dict.fromkeys(existing.ws_types + incoming.ws_types))
+
+        # 8. Fingerprints & Flags
+        if incoming.is_apple:
+            existing.is_apple = True
+        if incoming.is_randomized:
+            existing.is_randomized = True
+        if not existing.dhcp_fingerprint and incoming.dhcp_fingerprint:
+            existing.dhcp_fingerprint = incoming.dhcp_fingerprint
+        if not existing.dhcp_params and incoming.dhcp_params:
+            existing.dhcp_params = incoming.dhcp_params
+        if not existing.ssdp_fingerprint and incoming.ssdp_fingerprint:
+            existing.ssdp_fingerprint = incoming.ssdp_fingerprint
+        if not existing.tcp_syn_fingerprint and incoming.tcp_syn_fingerprint:
+            existing.tcp_syn_fingerprint = incoming.tcp_syn_fingerprint
+        if not existing.observed_ttl and incoming.observed_ttl:
+            existing.observed_ttl = incoming.observed_ttl
+        if not existing.ai_assessment and incoming.ai_assessment:
+            existing.ai_assessment = incoming.ai_assessment
 
     @staticmethod
     def _compute_device_status(
@@ -575,8 +701,15 @@ class DiscoveryEngine:
         if aliases:
             notes.append(f"Network Aliases: {', '.join(aliases)}")
 
+        configured_primary = whitelist.get(mac, {}).get("primary_ip") if (whitelist and mac) else None
+        final_ip = ip
+        if configured_primary and self._ip_rank(configured_primary, net_info.subnet_cidr) > self._ip_rank(ip, net_info.subnet_cidr):
+            final_ip = configured_primary
+            if ip and ip != configured_primary and ip not in aliases:
+                aliases.append(ip)
+
         dev_obj = Device(
-            ip=ip,
+            ip=final_ip,
             mac=mac,
             hostname=clean_host,
             vendor=vendor,
@@ -843,7 +976,7 @@ class DiscoveryEngine:
             )
 
         inventory: List[Device] = []
-        alien_devices: List[Device] = []
+        mac_to_dev: Dict[str, Device] = {}
 
         sorted_ips = sorted(
             list(all_ips),
@@ -870,10 +1003,20 @@ class DiscoveryEngine:
                 custom_ports=custom_ports,
                 phantom_devices=phantom_devices,
             )
+            mac_clean = (dev_obj.mac or "").strip().upper()
+            if self._is_valid_hardware_mac(mac_clean):
+                if mac_clean in mac_to_dev:
+                    existing = mac_to_dev[mac_clean]
+                    configured_primary = whitelist.get(mac_clean, {}).get("primary_ip") if whitelist else None
+                    self._merge_device_telemetry(existing, dev_obj, net_info.subnet_cidr, configured_primary)
+                    threats.extend(host_threats)
+                    continue
+                mac_to_dev[mac_clean] = dev_obj
+
             inventory.append(dev_obj)
-            if dev_obj.is_alien:
-                alien_devices.append(dev_obj)
             threats.extend(host_threats)
+
+        alien_devices = [d for d in inventory if d.is_alien]
 
         # Evaluate Out-of-Subnet Phantom Device threats
         threats.extend(

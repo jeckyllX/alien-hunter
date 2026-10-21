@@ -382,6 +382,80 @@ class TestRunAuditSkipsActiveDefenses(unittest.TestCase):
         self.assertEqual(threats, [])
 
 
+class TestDeviceDeduplication(unittest.TestCase):
+    """Validates multi-protocol / dual-stack (IPv4 + IPv6) device deduplication."""
+
+    def test_ip_rank_ordering(self):
+        # 1. Configured primary gets top rank (10)
+        self.assertEqual(DiscoveryEngine._ip_rank("192.168.1.100", "192.168.1.0/24", "192.168.1.100"), 10)
+        # 2. Local subnet IPv4 gets rank 5
+        self.assertEqual(DiscoveryEngine._ip_rank("192.168.1.55", "192.168.1.0/24"), 5)
+        # 3. Private out-of-subnet IPv4 gets rank 4
+        self.assertEqual(DiscoveryEngine._ip_rank("10.0.0.1", "192.168.1.0/24"), 4)
+        # 4. Public IPv4 gets rank 3
+        self.assertEqual(DiscoveryEngine._ip_rank("8.8.8.8", "192.168.1.0/24"), 3)
+        # 5. Global IPv6 gets rank 2
+        self.assertEqual(DiscoveryEngine._ip_rank("2001:db8::1", "192.168.1.0/24"), 2)
+        # 6. Link-local IPv6 gets rank 1
+        self.assertEqual(DiscoveryEngine._ip_rank("fe80::427:a304:176b:db45", "192.168.1.0/24"), 1)
+        # 7. Invalid string gets 0
+        self.assertEqual(DiscoveryEngine._ip_rank("invalid-ip", "192.168.1.0/24"), 0)
+
+    def test_valid_hardware_mac_validation(self):
+        self.assertTrue(DiscoveryEngine._is_valid_hardware_mac("FA:8D:B0:53:D3:48"))
+        self.assertTrue(DiscoveryEngine._is_valid_hardware_mac("fa-8d-b0-53-d3-48"))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac("N/A (Asleep)"))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac("N/A (Virtual / Alias)"))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac("00:00:00:00:00:00"))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac("FF:FF:FF:FF:FF:FF"))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac(""))
+        self.assertFalse(DiscoveryEngine._is_valid_hardware_mac(None))
+
+    def test_merge_device_telemetry_promotes_ipv4_and_preserves_ipv6_alias(self):
+        from alien_hunter.models import Device
+
+        # Existing device discovered first via IPv6
+        existing = Device(
+            ip="fe80::1",
+            mac="02:00:00:00:00:01",
+            hostname="Unknown",
+            vendor="Randomized Private MAC",
+            status="Online / Active",
+            trusted=True,
+            open_ports=["80/HTTP"],
+            discovery_method="IPv6 Neighbor Discovery",
+        )
+
+        # Incoming device discovered second via IPv4 ARP
+        incoming = Device(
+            ip="192.168.1.150",
+            mac="02:00:00:00:00:01",
+            hostname="device-host",
+            friendly_name="Test Device",
+            vendor="Generic Vendor Inc.",
+            status="Online / Active",
+            trusted=True,
+            open_ports=["443/HTTPS"],
+            discovery_method="Layer-2 ARP Scan",
+        )
+
+        DiscoveryEngine._merge_device_telemetry(existing, incoming, subnet_cidr="192.168.1.0/24")
+
+        # Local IPv4 is promoted to primary IP
+        self.assertEqual(existing.ip, "192.168.1.150")
+        # IPv6 address is preserved as alias
+        self.assertIn("fe80::1", existing.aliases)
+        # Hostname, friendly name, and resolved vendor are preserved
+        self.assertEqual(existing.hostname, "device-host")
+        self.assertEqual(existing.friendly_name, "Test Device")
+        self.assertEqual(existing.vendor, "Generic Vendor Inc.")
+        # Open ports merged and sorted
+        self.assertEqual(existing.open_ports, ["80/HTTP", "443/HTTPS"])
+        # Discovery methods combined
+        self.assertIn("IPv6 Neighbor Discovery", existing.discovery_method)
+        self.assertIn("Layer-2 ARP Scan", existing.discovery_method)
+
+
 if __name__ == "__main__":
     unittest.main()
 
