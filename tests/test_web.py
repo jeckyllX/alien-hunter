@@ -222,6 +222,81 @@ class TestSentinelState(unittest.TestCase):
         self.assertEqual(SentinelState._format_uptime(3665), "1h 1m 5s")
         self.assertEqual(SentinelState._format_uptime(90060), "1d 1h 1m")
 
+    def test_update_audit_deduplicates_same_mac_across_ipv4_and_ipv6(self):
+        # A trusted device discovered on both IPv4 and IPv6 with the same hardware MAC
+        dev_v4 = Device(
+            ip="192.168.1.150",
+            mac="02:00:00:00:00:01",
+            hostname="device-host",
+            friendly_name="Test Device",
+            vendor="Generic Vendor Inc.",
+            trusted=True,
+            is_alien=False,
+            open_ports=["443/HTTPS"],
+            discovery_method="Layer-2 ARP Scan",
+        )
+        dev_v6 = Device(
+            ip="fe80::1",
+            mac="02:00:00:00:00:01",
+            hostname="Unknown",
+            friendly_name="Test Device",
+            vendor="Generic Vendor Inc.",
+            trusted=True,
+            is_alien=False,
+            open_ports=["80/HTTP"],
+            discovery_method="IPv6 Neighbor Discovery",
+        )
+        net_info = NetworkInfo(
+            interface="eth0",
+            local_ip="192.168.1.50",
+            local_mac="00:11:22:33:44:55",
+            subnet_base="192.168.1",
+            prefix_len=24,
+        )
+
+        self.state.update_audit(devices=[dev_v4, dev_v6], threats=[], network_info=net_info)
+        devices_payload = self.state.get_devices_payload()
+
+        # Must be exactly one trusted entry, not two
+        self.assertEqual(len(devices_payload["trusted"]), 1)
+        entry = devices_payload["trusted"][0]
+        self.assertEqual(entry["mac"], "02:00:00:00:00:01")
+        self.assertEqual(entry["ip"], "192.168.1.150")
+        self.assertIn("fe80::1", entry["aliases"])
+        self.assertIn("443/HTTPS", entry["ports"])
+        self.assertIn("80/HTTP", entry["ports"])
+        self.assertIn("Layer-2 ARP Scan", entry["discovery_method"])
+        self.assertIn("IPv6 Neighbor Discovery", entry["discovery_method"])
+
+    def test_update_audit_deduplicates_alien_devices_same_mac(self):
+        alien_v4 = Device(
+            ip="192.168.1.222",
+            mac="DE:AD:BE:EF:CA:FE",
+            hostname="intruder",
+            vendor="Unknown Vendor",
+            trusted=False,
+            is_alien=True,
+            discovery_method="Layer-2 ARP Scan",
+        )
+        alien_v6 = Device(
+            ip="fe80::dead:beef:cafe:1",
+            mac="DE:AD:BE:EF:CA:FE",
+            hostname="Unknown",
+            vendor="Unknown Vendor",
+            trusted=False,
+            is_alien=True,
+            discovery_method="Passive Frame Sniffer",
+        )
+
+        self.state.update_audit(devices=[alien_v4, alien_v6], threats=[])
+        devices_payload = self.state.get_devices_payload()
+
+        self.assertEqual(len(devices_payload["alien"]), 1)
+        entry = devices_payload["alien"][0]
+        self.assertEqual(entry["mac"], "DE:AD:BE:EF:CA:FE")
+        self.assertEqual(entry["ip"], "192.168.1.222")
+        self.assertIn("fe80::dead:beef:cafe:1", entry["aliases"])
+
 
 class TestLightweightWebServer(unittest.TestCase):
     """Tests HTTP endpoints, JSON API, and whitelisting workflow."""
