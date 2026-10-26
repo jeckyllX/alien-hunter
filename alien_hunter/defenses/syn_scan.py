@@ -114,7 +114,7 @@ class SynScanDetector:
         # State tracking: src_ip -> list of probe dicts
         self._probes: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
         self._last_alert_time: Dict[str, float] = {}
-        self._detected_events: List[SynScanEvent] = []
+        self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -237,6 +237,11 @@ class SynScanDetector:
                 }
             )
             self._probes[src_ip] = probes
+
+            if len(self._probes) > 1000:
+                expired = [k for k, v in self._probes.items() if not v or v[-1]["timestamp"] < cutoff]
+                for k in expired:
+                    del self._probes[k]
 
             # Immediate alert for abnormal non-SYN scans (NULL, FIN, XMAS have 0 legitimate use)
             if scan_type in ("NULL Scan", "FIN Scan", "XMAS Scan"):

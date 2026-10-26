@@ -139,7 +139,7 @@ class RogueDhcpGuard:
         self._observed_servers: Dict[str, Dict[str, Any]] = {}
         # Cooldown: (threat_type, server_ip, server_mac) -> timestamp
         self._last_alert_times: Dict[Tuple[str, str, str], float] = collections.defaultdict(float)
-        self._detected_events: List[RogueDhcpEvent] = []
+        self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None

@@ -169,7 +169,10 @@ class SentinelWatchdog:
         gateway_mac = net_info.gateway_mac if net_info else None
 
         if self.honey_ports:
-            self.honey_listener = HoneyPortListener(ports=self.honey_ports)
+            ignored_ips = {"127.0.0.1", "::1"}
+            if local_ip:
+                ignored_ips.add(local_ip)
+            self.honey_listener = HoneyPortListener(ports=self.honey_ports, ignored_ips=ignored_ips)
             bound = self.honey_listener.start()
             if bound:
                 print(f"{Colors.GREEN}[+] Decoy Honey-Port Canary active on TCP ports: {', '.join(map(str, bound))}{Colors.RESET}")
@@ -281,6 +284,7 @@ class SentinelWatchdog:
                         except Exception as e:
                             log.debug("On-demand AI engine initialization failed: %s", e)
 
+                    original_analyze_on = ai_engine.analyze_on if ai_engine else None
                     if ai_engine and self._force_analyze_all:
                         ai_engine.analyze_on = "all_devices"
 
@@ -290,17 +294,22 @@ class SentinelWatchdog:
                     if self.web_state:
                         self.web_state.set_scanning(True)
 
-                    # Reload whitelist dynamically in case user updated it
-                    whitelist = self.config_mgr.load_whitelist(self.whitelist_path)
-                    result = self.engine.run_audit(
-                        whitelist=whitelist,
-                        deep_scan=deep_scan,
-                        passive_duration=2,
-                        interface=self.interface,
-                        ai_engine=ai_engine,
-                        custom_ports=self.custom_ports,
-                        active_background_defenses=self._active_defenses_dict(),
-                    )
+                    try:
+                        # Reload whitelist dynamically in case user updated it
+                        whitelist = self.config_mgr.load_whitelist(self.whitelist_path)
+                        result = self.engine.run_audit(
+                            whitelist=whitelist,
+                            deep_scan=deep_scan,
+                            passive_duration=2,
+                            interface=self.interface,
+                            ai_engine=ai_engine,
+                            custom_ports=self.custom_ports,
+                            active_background_defenses=self._active_defenses_dict(),
+                        )
+                    finally:
+                        if ai_engine and original_analyze_on is not None:
+                            ai_engine.analyze_on = original_analyze_on
+
                     if self.sync_db:
                         self.config_mgr.sync_device_inventory(
                             result.devices,
@@ -310,6 +319,8 @@ class SentinelWatchdog:
 
                     # Update defense modules with current local identity and network baseline
                     if result.network:
+                        if self.honey_listener and result.network.local_ip:
+                            self.honey_listener.update_local_ip(result.network.local_ip)
                         if self.syn_detector:
                             if result.network.local_ip:
                                 self.syn_detector.local_ip = result.network.local_ip
@@ -323,7 +334,9 @@ class SentinelWatchdog:
 
                         if self.arp_guard:
                             trusted_map = {
-                                d.ip: d.mac for d in result.devices if d.mac and d.trusted
+                                d.ip: d.mac
+                                for d in result.devices
+                                if d.mac and d.trusted and d.status in ("Online / Active", "Local Machine")
                             }
                             self.arp_guard.update_topology(
                                 gateway_ip=result.network.gateway_ip,
@@ -370,7 +383,7 @@ class SentinelWatchdog:
                         )
 
                     new_aliens = [
-                        a for a in result.alien_devices if a.mac not in self.known_alien_macs
+                        a for a in result.alien_devices if a.mac and a.mac.upper() not in self.known_alien_macs
                     ]
 
                     has_live_threats = any(threat_groups.values()) or bool(new_audit_threats)
@@ -384,11 +397,14 @@ class SentinelWatchdog:
                                 print(
                                     f"   {Colors.RED}• {a.ip:<15} {a.mac:<18} {a.vendor} ({a.display_name}){Colors.RESET}"
                                 )
-                                self.known_alien_macs.add(a.mac)
+                                self.known_alien_macs.add(a.mac.upper())
 
-                        # Dispatch to all active notification hooks
+                        # Dispatch only new audit threats + live defense events to prevent repeated notifications
+                        notify_threats = new_audit_threats + [
+                            msg for msgs in threat_groups.values() for msg in msgs
+                        ]
                         dispatched = self.notifier.dispatch(
-                            new_aliens, combined_threats, audit_result=result
+                            new_aliens, notify_threats, audit_result=result
                         )
                         if dispatched:
                             success_hooks = [k for k, v in dispatched.items() if v]
@@ -397,6 +413,11 @@ class SentinelWatchdog:
                             failed_hooks = [k for k, v in dispatched.items() if not v]
                             if failed_hooks:
                                 print(f"{Colors.YELLOW}[!] Alerts failed on: {', '.join(failed_hooks)}{Colors.RESET}")
+
+                    # Sync known threats and alien MACs so resolved issues can alert if they recur
+                    self.known_audit_threats = set(result.threats)
+                    current_alien_macs = {a.mac.upper() for a in result.alien_devices if a.mac}
+                    self.known_alien_macs = {m for m in self.known_alien_macs if m in current_alien_macs}
 
                     self._scan_trigger.wait(self.interval)
                     self._scan_trigger.clear()

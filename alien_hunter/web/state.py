@@ -32,7 +32,7 @@ class SentinelState:
         self.recent_threats: List[str] = []
         self.ai_posture: Optional[Dict[str, Any]] = None
         self.event_mgr = event_manager or EventManager()
-        self._logged_threats: Set[str] = set()
+        self._logged_threats: Dict[str, float] = {}
         self._known_alien_macs: Set[str] = set()
 
     def set_scanning(self, scanning: bool = True):
@@ -162,14 +162,20 @@ class SentinelState:
             self.recent_threats = list(threats)
 
             # Record threat alerts
+            current_threat_keys = set()
             for threat_msg in threats:
                 t_clean = threat_msg.strip()
-                if t_clean and t_clean not in self._logged_threats:
-                    self._logged_threats.add(t_clean)
+                if not t_clean:
+                    continue
+                current_threat_keys.add(t_clean)
+                if t_clean not in self._logged_threats:
+                    self._logged_threats[t_clean] = time.time()
                     self._record_threat_event(t_clean)
 
-            if len(self._logged_threats) > 1000:
-                self._logged_threats = set(list(self._logged_threats)[-500:])
+            # Prune cleared threats so recurring events can alert again
+            for old_threat in list(self._logged_threats.keys()):
+                if old_threat not in current_threat_keys:
+                    del self._logged_threats[old_threat]
 
             now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             existing_trusted = {
@@ -260,6 +266,7 @@ class SentinelState:
                     if is_hw_mac:
                         trusted_map[mac_upper] = dev_dict
                         seen_trusted_macs.add(mac_upper)
+                        self._known_alien_macs.discard(mac_upper)
                     else:
                         unkeyed_trusted.append(dev_dict)
                 else:
@@ -431,6 +438,7 @@ class SentinelState:
         primary_ip = entry.get("primary_ip", "")
 
         with self._lock:
+            self._known_alien_macs.discard(mac_upper)
             new_alien: List[Dict[str, Any]] = []
             target_dev = None
 

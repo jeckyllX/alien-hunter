@@ -181,11 +181,10 @@ class PortScanner:
     def check_port(self, ip: str, port: int) -> bool:
         """Attempts a quick TCP handshake on target IP and port."""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(self.timeout)
-            res = s.connect_ex((ip, port))
-            s.close()
-            return res == 0
+            family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(self.timeout)
+                return s.connect_ex((ip, port)) == 0
         except Exception:
             return False
 
@@ -197,7 +196,8 @@ class PortScanner:
         """
         # 1. Spontaneous server greeting on TCP connect
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            family = socket.AF_INET6 if ":" in ip else socket.AF_INET
+            with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.settimeout(timeout)
                 s.connect((ip, port))
                 greeting = s.recv(512)
@@ -213,7 +213,8 @@ class PortScanner:
 
         # 2. Generic HTTP probe
         try:
-            url = f"http://{ip}:{port}/"
+            host_str = f"[{ip}]" if ":" in ip else ip
+            url = f"http://{host_str}:{port}/"
             req = urllib.request.Request(url, headers={"User-Agent": "AlienHunter/1.0"}, method="GET")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 server = resp.headers.get("Server", "").strip()

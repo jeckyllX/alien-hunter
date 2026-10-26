@@ -79,7 +79,7 @@ class IcmpRedirectGuard:
         self._lock = threading.Lock()
 
         self._threat_queue: deque = deque(maxlen=history_maxlen)
-        self._event_history: List[IcmpRedirectEvent] = []
+        self._event_history: deque = deque(maxlen=history_maxlen)
         # Key: (sender_ip, new_gateway, orig_dest_ip) -> (last_time, count)
         self._rate_limits: Dict[Tuple[str, str, str], Tuple[float, int]] = {}
 

@@ -16,7 +16,7 @@ from ..models import Device, NetworkInfo, AuditResult
 from ..scanners.arp import ArpScanner
 from ..scanners.router import RouterDnsAuditor
 from ..scanners.sniffer import PassiveFrameSniffer
-from ..scanners.ports import PortScanner
+from ..scanners.ports import PortScanner, DEEP_PORTS, FAST_PORTS
 from ..scanners.ssdp import SsdpScanner
 from ..scanners.netbios import NetbiosScanner
 from ..scanners.mdns import MdnsScanner
@@ -319,6 +319,7 @@ class DiscoveryEngine:
         mdns_devices: Optional[Dict[str, Dict[str, Any]]],
         ws_devices: Optional[Dict[str, Dict[str, Any]]],
         passive_transmitters: Dict[str, str],
+        ipv6_devices: Optional[Dict[str, str]] = None,
     ) -> str:
         """Determines whether a discovered IP is the local machine, actively online, or an inactive lease."""
         if ip == net_info.local_ip:
@@ -330,6 +331,7 @@ class DiscoveryEngine:
             or (mdns_devices and ip in mdns_devices)
             or (ws_devices and ip in ws_devices)
             or ip in passive_transmitters
+            or (ipv6_devices and ip in ipv6_devices)
         ):
             return "Online / Active"
         return "Sleeping / Inactive Lease"
@@ -380,6 +382,7 @@ class DiscoveryEngine:
         observed_ttl: Optional[int],
         tcp_syn_fingerprint: Optional[str],
         dhcp_fingerprint: Optional[str],
+        active_honey_ports: Optional[Set[int]] = None,
     ) -> Tuple[List[str], List[str], List[str]]:
         """Executes port scanning, port drift analysis, and doppelganger checks for a single host."""
         open_ports: List[str] = []
@@ -387,8 +390,17 @@ class DiscoveryEngine:
         port_notes: List[str] = []
 
         if status in ("Online / Active", "Local Machine"):
+            scan_ports = custom_ports
+            if status == "Local Machine" and active_honey_ports:
+                if scan_ports is not None:
+                    scan_ports = [p for p in scan_ports if p not in active_honey_ports]
+                elif deep_scan:
+                    scan_ports = [p for p in DEEP_PORTS if p not in active_honey_ports]
+                else:
+                    scan_ports = [p for p in FAST_PORTS if p not in active_honey_ports]
+
             open_ports, detected_threats, notes_ports = self.port_scanner.scan_host(
-                ip, deep_scan=deep_scan, ports=custom_ports
+                ip, deep_scan=deep_scan, ports=scan_ports
             )
             port_notes.extend(notes_ports)
 
@@ -455,6 +467,7 @@ class DiscoveryEngine:
         ipv6_devices: Optional[Dict[str, str]] = None,
         custom_ports: Optional[List[int]] = None,
         phantom_devices: Optional[Dict[str, str]] = None,
+        active_honey_ports: Optional[Set[int]] = None,
     ) -> Tuple[Device, List[str]]:
         """Correlates multiple discovery signals into an enriched Device object and host threats."""
         mac = self._resolve_device_mac(
@@ -634,6 +647,7 @@ class DiscoveryEngine:
             mdns_devices=mdns_devices,
             ws_devices=ws_devices,
             passive_transmitters=passive_transmitters,
+            ipv6_devices=ipv6_devices,
         )
         if status == "Local Machine":
             is_trusted = True
@@ -676,6 +690,7 @@ class DiscoveryEngine:
             observed_ttl=observed_ttl,
             tcp_syn_fingerprint=tcp_syn_fingerprint,
             dhcp_fingerprint=dhcp_fingerprint,
+            active_honey_ports=active_honey_ports,
         )
         notes.extend(port_notes)
 
@@ -869,6 +884,7 @@ class DiscoveryEngine:
             all_ips.add(net_info.local_ip)
 
         bg_defenses = active_background_defenses or {}
+        active_honey_ports = set(bg_defenses.get("honey_ports") or [])
 
         # Threat Detection & Active Defenses:
         # a) ARP Spoofing / Rogue Gateway
@@ -1002,6 +1018,7 @@ class DiscoveryEngine:
                 ipv6_devices=ipv6_devices,
                 custom_ports=custom_ports,
                 phantom_devices=phantom_devices,
+                active_honey_ports=active_honey_ports,
             )
             mac_clean = (dev_obj.mac or "").strip().upper()
             if self._is_valid_hardware_mac(mac_clean):

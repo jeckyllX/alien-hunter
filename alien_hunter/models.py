@@ -182,7 +182,7 @@ class SentinelConfig:
     rogue_dhcp_enabled: bool = True
     storm_guard_enabled: bool = True
     cam_flood_threshold: int = 30
-    broadcast_storm_threshold: int = 150
+    broadcast_storm_threshold: int = 400
 
     @classmethod
     def from_defense_config(

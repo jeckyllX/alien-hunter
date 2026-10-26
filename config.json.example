@@ -31,7 +31,7 @@
     "rogue_dhcp_enabled": true,
     "storm_guard_enabled": true,
     "cam_flood_threshold": 30,
-    "broadcast_storm_threshold": 150
+    "broadcast_storm_threshold": 400
   },
   "ai_analysis": {
     "enabled": false,

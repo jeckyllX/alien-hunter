@@ -75,8 +75,8 @@ class StormGuard:
         interface: Optional[str] = None,
         local_mac: Optional[str] = None,
         cam_flood_threshold: int = 30,
-        broadcast_storm_threshold: int = 150,
-        window_seconds: float = 2.0,
+        broadcast_storm_threshold: int = 400,
+        window_seconds: float = 3.0,
         alert_cooldown: float = 30.0,
         history_maxlen: int = 250,
     ):
@@ -99,7 +99,7 @@ class StormGuard:
 
         # Output threat queues
         self._threat_queue: deque = deque(maxlen=history_maxlen)
-        self._event_history: List[StormEvent] = []
+        self._event_history: deque = deque(maxlen=history_maxlen)
         self._last_alert_times: Dict[str, float] = {}
 
     def update_local_mac(self, local_mac: Optional[str]):
@@ -196,10 +196,10 @@ class StormGuard:
                     return event
 
             # 2. Evaluate Broadcast / Multicast Storm
-            # Require at least 50 broadcast frames and a minimum 0.5s observation duration
-            # to prevent brief sub-second packet bursts (e.g. ARP sweeps or mDNS lookups) from extrapolating into storms.
+            # Require minimum observation duration to prevent brief sub-second micro-bursts from extrapolating into storms.
             bcast_count = sum(1 for item in self._frame_history if item[2])
-            if bcast_count >= min(50, self.broadcast_storm_threshold) and duration >= 0.5:
+            min_duration = min(0.75, self.window_seconds * 0.5)
+            if duration >= min_duration and bcast_count >= min(50, self.broadcast_storm_threshold):
                 bcast_pps = bcast_count / duration
 
                 if bcast_pps >= self.broadcast_storm_threshold:
