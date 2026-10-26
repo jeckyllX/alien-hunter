@@ -4,6 +4,7 @@ Binds non-blocking decoy TCP sockets to detect internal reconnaissance,
 lateral movement, and worm propagation by compromised network hosts.
 """
 
+import collections
 import select
 import socket
 import threading
@@ -65,15 +66,25 @@ class HoneyPortListener:
         ports: Optional[List[int]] = None,
         on_intrusion: Optional[Callable[[HoneyPortEvent], None]] = None,
         bind_host: str = "0.0.0.0",
+        ignored_ips: Optional[Set[str]] = None,
+        history_maxlen: int = 250,
     ):
         self.requested_ports = ports or self.DEFAULT_DECOY_PORTS
         self.on_intrusion = on_intrusion
         self.bind_host = bind_host
+        self.ignored_ips: Set[str] = set(ignored_ips or [])
+        self.history_maxlen = history_maxlen
         self.active_sockets: Dict[int, socket.socket] = {}
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self.detected_events: List[HoneyPortEvent] = []
+        self.detected_events: collections.deque = collections.deque(maxlen=history_maxlen)
+
+    def update_local_ip(self, ip: Optional[str]) -> None:
+        """Dynamically adds local host IP to ignored IPs to prevent self-canary triggers."""
+        if ip:
+            with self._lock:
+                self.ignored_ips.add(ip)
 
     def start(self) -> List[int]:
         """
@@ -135,19 +146,35 @@ class HoneyPortListener:
                         conn, addr = s.accept()
                         src_ip, src_port = addr[0], addr[1]
                         dest_port = s.getsockname()[1]
+
+                        with self._lock:
+                            is_ignored_ip = src_ip in self.ignored_ips
+
+                        if is_ignored_ip:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+                            continue
+
                         meta = HoneyAuthTrap.inspect_connection(conn, dest_port)
                         try:
                             conn.close()
                         except Exception:
                             pass
 
+                        tooling = meta.get("tooling", "")
+                        payload = meta.get("payload_snippet", "")
+                        if "AlienHunter/" in tooling or "AlienHunter/" in payload:
+                            continue
+
                         event = HoneyPortEvent(
                             src_ip=src_ip,
                             src_port=src_port,
                             dest_port=dest_port,
                             timestamp=time.time(),
-                            payload_snippet=meta.get("payload_snippet", ""),
-                            tooling=meta.get("tooling", ""),
+                            payload_snippet=payload,
+                            tooling=tooling,
                             credentials=meta.get("credentials", ""),
                         )
 

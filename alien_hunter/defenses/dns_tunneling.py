@@ -122,7 +122,7 @@ class DnsTunnelingDetector:
         # State tracking: src_ip -> list of query records
         self._queries: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
         self._last_alert_time: Dict[str, float] = {}
-        self._detected_events: List[DnsTunnelingEvent] = []
+        self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -294,6 +294,11 @@ class DnsTunnelingDetector:
                 }
             )
             self._queries[src_ip] = queries
+
+            if len(self._queries) > 1000:
+                expired = [k for k, v in self._queries.items() if not v or v[-1]["timestamp"] < cutoff]
+                for k in expired:
+                    del self._queries[k]
 
             # Trigger condition: immediate high-confidence or burst threshold reached
             if is_immediate or len(queries) >= self.burst_threshold:

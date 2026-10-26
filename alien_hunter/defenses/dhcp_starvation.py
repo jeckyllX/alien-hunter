@@ -89,7 +89,7 @@ class DhcpStarvationGuard:
         # record: {"time": float, "src_mac": str, "chaddr": str, "msg_type": int, "xid": bytes}
         self._history: collections.deque = collections.deque()
         self._last_alert_time: float = 0.0
-        self._detected_events: List[DhcpStarvationEvent] = []
+        self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None

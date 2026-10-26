@@ -99,6 +99,7 @@ class ArpPoisonGuard:
         alert_cooldown: float = 30.0,
         self_healing_enabled: bool = True,
         healer: Optional[ArpSelfHealing] = None,
+        history_maxlen: int = 250,
     ):
         self.interface = interface
         self.gateway_ip = gateway_ip
@@ -111,6 +112,7 @@ class ArpPoisonGuard:
         self.garp_window_seconds = garp_window_seconds
         self.alert_cooldown = alert_cooldown
         self.self_healing_enabled = self_healing_enabled
+        self.history_maxlen = history_maxlen
         self.healer: Optional[ArpSelfHealing] = healer or (
             ArpSelfHealing(interface=self.interface) if self_healing_enabled else None
         )
@@ -120,7 +122,7 @@ class ArpPoisonGuard:
         # Alert cooldown tracking: (threat_type, spoofed_ip, attacker_mac) -> timestamp
         self._last_alert_times: Dict[Tuple[str, str, str], float] = {}
 
-        self._detected_events: List[ArpPoisonEvent] = []
+        self._detected_events: collections.deque = collections.deque(maxlen=history_maxlen)
         self._lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -137,10 +139,12 @@ class ArpPoisonGuard:
                 self.gateway_ip = gateway_ip
             if gateway_mac:
                 self.gateway_mac = gateway_mac.upper()
-            if trusted_ip_mac_map:
+            if trusted_ip_mac_map is not None:
+                new_map = {}
                 for ip, mac in trusted_ip_mac_map.items():
                     if mac and mac != "N/A" and "Asleep" not in mac:
-                        self.trusted_ip_mac_map[ip] = mac.upper()
+                        new_map[ip] = mac.upper()
+                self.trusted_ip_mac_map = new_map
 
             if self.healer and self.interface:
                 self.healer.interface = self.interface

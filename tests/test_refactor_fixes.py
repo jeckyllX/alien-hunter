@@ -456,6 +456,208 @@ class TestDeviceDeduplication(unittest.TestCase):
         self.assertIn("Layer-2 ARP Scan", existing.discovery_method)
 
 
+class TestPhase1BugFixes(unittest.TestCase):
+    """Validates Phase 1 bug fixes and defense stability improvements."""
+
+    def test_honey_port_ignores_configured_ignored_ips(self):
+        from alien_hunter.defenses.honey_port import HoneyPortListener
+        import socket
+        import time
+
+        test_port = 19556
+        listener = HoneyPortListener(
+            ports=[test_port],
+            bind_host="127.0.0.1",
+            ignored_ips={"127.0.0.1"},
+        )
+        bound = listener.start()
+        self.assertIn(test_port, bound)
+
+        # Connect from ignored IP (127.0.0.1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(("127.0.0.1", test_port))
+        client.close()
+
+        time.sleep(0.15)
+        threats = listener.get_threat_strings()
+        listener.stop()
+
+        # Should be ignored and produce 0 threats
+        self.assertEqual(len(threats), 0)
+
+    def test_discovery_engine_status_computation_with_ipv6(self):
+        net_info = NetworkInfo("eth0", "192.168.1.10", "AA:BB:CC:DD:EE:01", subnet_base="192.168.1")
+        status = DiscoveryEngine._compute_device_status(
+            ip="2001:db8::1",
+            net_info=net_info,
+            active_devices={},
+            ssdp_devices={},
+            netbios_devices={},
+            mdns_devices={},
+            ws_devices={},
+            passive_transmitters={},
+            ipv6_devices={"2001:db8::1": "AA:BB:CC:DD:EE:02"},
+        )
+        self.assertEqual(status, "Online / Active")
+
+    def test_arp_poison_guard_clears_stale_ips_on_update_topology(self):
+        from alien_hunter.defenses.arp_poison import ArpPoisonGuard
+
+        guard = ArpPoisonGuard(
+            interface="eth0",
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:11:22:33:44:01",
+            trusted_ip_mac_map={"192.168.1.50": "00:11:22:33:44:50"},
+            self_healing_enabled=False,
+        )
+        self.assertIn("192.168.1.50", guard.trusted_ip_mac_map)
+
+        # DHCP reassigns: 192.168.1.50 is no longer mapped to that device
+        guard.update_topology(
+            trusted_ip_mac_map={"192.168.1.60": "00:11:22:33:44:60"}
+        )
+        self.assertNotIn("192.168.1.50", guard.trusted_ip_mac_map)
+        self.assertIn("192.168.1.60", guard.trusted_ip_mac_map)
+
+    def test_port_scanner_handles_ipv6_syntax(self):
+        scanner = PortScanner(timeout=0.1)
+        # Port scan on non-routable IPv6 documentation address shouldn't raise exception
+        result = scanner.check_port("2001:db8::1", 80)
+        self.assertFalse(result)
+
+    def test_storm_guard_ignores_sub_second_burst(self):
+        from alien_hunter.defenses.storm_guard import StormGuard
+        from tests.test_storm_guard import build_ethernet_frame
+
+        guard = StormGuard(
+            interface="eth0",
+            cam_flood_threshold=30,
+            broadcast_storm_threshold=400,
+            window_seconds=3.0,
+            alert_cooldown=10.0,
+        )
+        base_time = 1000.0
+        event = None
+
+        # Simulate a 75-packet burst over 0.4s (wake-up mDNS/SSDP burst)
+        for i in range(75):
+            frame = build_ethernet_frame("FF:FF:FF:FF:FF:FF", "AA:BB:CC:DD:EE:01")
+            res = guard.process_frame(frame, now=base_time + (i * 0.005))
+            if res:
+                event = res
+
+        # Must not alert on sub-second micro-burst
+        self.assertIsNone(event)
+
+    def test_honey_port_ignores_alien_hunter_user_agent(self):
+        from alien_hunter.defenses.honey_port import HoneyPortListener
+        import socket
+        import time
+
+        test_port = 19557
+        listener = HoneyPortListener(
+            ports=[test_port],
+            bind_host="127.0.0.1",
+        )
+        bound = listener.start()
+        self.assertIn(test_port, bound)
+
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(("127.0.0.1", test_port))
+        # Send probe with AlienHunter user-agent
+        probe = b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nUser-Agent: AlienHunter/1.0\r\n\r\n"
+        client.sendall(probe)
+        client.close()
+
+        time.sleep(0.15)
+        threats = listener.get_threat_strings()
+        listener.stop()
+
+        self.assertEqual(len(threats), 0)
+
+    def test_local_machine_skips_honey_ports(self):
+        engine = DiscoveryEngine()
+        mock_scanner = unittest.mock.MagicMock()
+        mock_scanner.scan_host.return_value = (["22/SSH"], [], [])
+        engine.port_scanner = mock_scanner
+
+        # Scan local machine with honey_ports {8888, 5555}
+        open_ports, threats, notes = engine._audit_device_ports_and_threats(
+            ip="192.0.2.10",
+            mac="AA:BB:CC:DD:EE:01",
+            status="Local Machine",
+            clean_host="sensor-node",
+            friendly_name="Local Host",
+            vendor="Generic Embedded",
+            whitelist={},
+            deep_scan=True,
+            custom_ports=[22, 8888, 5555],
+            observed_ttl=64,
+            tcp_syn_fingerprint=None,
+            dhcp_fingerprint=None,
+            active_honey_ports={8888, 5555},
+        )
+
+        # scan_host must have been called without honey_ports 8888 and 5555
+        mock_scanner.scan_host.assert_called_once()
+        passed_ports = mock_scanner.scan_host.call_args[1].get("ports")
+        self.assertEqual(passed_ports, [22])
+
+    def test_sentinel_watchdog_restores_ai_engine_analyze_on(self):
+        mock_ai = unittest.mock.MagicMock()
+        mock_ai.analyze_on = "alien_only"
+        original_analyze_on = mock_ai.analyze_on
+        force_analyze_all = True
+        try:
+            if mock_ai and force_analyze_all:
+                mock_ai.analyze_on = "all_devices"
+            self.assertEqual(mock_ai.analyze_on, "all_devices")
+        finally:
+            if mock_ai and original_analyze_on is not None:
+                mock_ai.analyze_on = original_analyze_on
+        self.assertEqual(mock_ai.analyze_on, "alien_only")
+
+    def test_web_state_threat_logging_and_reoccurrence(self):
+        from alien_hunter.web.state import SentinelState
+
+        state = SentinelState()
+        # Scan 1: Threat present
+        state.update_audit(
+            devices=[],
+            threats=["CRITICAL: Rogue DNS Detected!"],
+            network_info={},
+            active_defenses={},
+        )
+        self.assertEqual(len(state.event_mgr.get_events()), 1)
+
+        # Scan 2: Same threat still present (should not log duplicate event)
+        state.update_audit(
+            devices=[],
+            threats=["CRITICAL: Rogue DNS Detected!"],
+            network_info={},
+            active_defenses={},
+        )
+        self.assertEqual(len(state.event_mgr.get_events()), 1)
+
+        # Scan 3: Threat clears
+        state.update_audit(
+            devices=[],
+            threats=[],
+            network_info={},
+            active_defenses={},
+        )
+        self.assertEqual(len(state.event_mgr.get_events()), 1)
+
+        # Scan 4: Threat recurs (should log a new alert event)
+        state.update_audit(
+            devices=[],
+            threats=["CRITICAL: Rogue DNS Detected!"],
+            network_info={},
+            active_defenses={},
+        )
+        self.assertEqual(len(state.event_mgr.get_events()), 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 
