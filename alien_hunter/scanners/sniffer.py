@@ -12,6 +12,7 @@ from typing import Dict, Optional
 
 from ..identifiers.tcp_syn import TcpSynParser
 from ..identifiers.ssdp import SsdpParser
+from .net_utils import disable_promiscuous_mode, enable_promiscuous_mode
 
 
 class PassiveFrameSniffer:
@@ -55,14 +56,14 @@ class PassiveFrameSniffer:
             if self.interface:
                 raw_sock.bind((self.interface, 0))
 
-                # Enable hardware promiscuous mode on the network interface
-                try:
-                    ifindex = socket.if_nametoindex(self.interface)
-                    mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
-                    raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
-                except Exception:
-                    # Fail-safe: continue in standard capture mode if non-root or unsupported
-                    mreq = None
+                # Enable hardware promiscuous mode on wired Ethernet interfaces
+                mreq = enable_promiscuous_mode(
+                    raw_sock,
+                    self.interface,
+                    sol_packet=self.SOL_PACKET,
+                    packet_add_membership=self.PACKET_ADD_MEMBERSHIP,
+                    packet_mr_promisc=self.PACKET_MR_PROMISC,
+                )
 
             raw_sock.settimeout(1.0)
 
@@ -136,11 +137,12 @@ class PassiveFrameSniffer:
             pass
         finally:
             if raw_sock:
-                if mreq:
-                    try:
-                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
-                    except Exception:
-                        pass
+                disable_promiscuous_mode(
+                    raw_sock,
+                    mreq,
+                    sol_packet=self.SOL_PACKET,
+                    packet_drop_membership=self.PACKET_DROP_MEMBERSHIP,
+                )
                 try:
                     raw_sock.close()
                 except Exception:

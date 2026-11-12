@@ -3,7 +3,9 @@ Network and Raw Socket Utilities for Alien Hunter scanners.
 Provides reusable socket creation, interface binding, and broadcast resolution.
 """
 
+import os
 import socket
+import struct
 from typing import Callable, Optional, TypeVar
 
 from ..logging_setup import get_logger
@@ -11,6 +13,92 @@ from ..logging_setup import get_logger
 log = get_logger()
 
 T = TypeVar("T")
+
+SOL_PACKET = getattr(socket, "SOL_PACKET", 263)
+PACKET_ADD_MEMBERSHIP = 1
+PACKET_DROP_MEMBERSHIP = 2
+PACKET_MR_PROMISC = 1
+
+_NON_PROMISC_PREFIXES = (
+    "wl",
+    "wlan",
+    "wifi",
+    "ath",
+    "ra",
+    "lo",
+    "wg",
+    "tun",
+    "tap",
+    "tailscale",
+    "docker",
+    "veth",
+    "br-",
+    "virbr",
+)
+
+
+def is_promiscuous_safe_interface(interface: Optional[str]) -> bool:
+    """
+    Returns True if enabling hardware promiscuous mode (PACKET_MR_PROMISC) is safe
+    and meaningful on ``interface``.
+
+    Returns False for managed wireless interfaces (where 802.11 WPA2/WPA3 per-station
+    PTK encryption prevents sniffing other stations' unicast frames and hardware
+    promiscuous mode degrades FullMAC firmware such as brcmfmac), loopback, and
+    Layer-3 virtual tunnels.
+    """
+    if not interface:
+        return False
+    iface_clean = interface.strip()
+    if not iface_clean:
+        return False
+    if iface_clean.lower().startswith(_NON_PROMISC_PREFIXES):
+        return False
+    for marker in ("wireless", "phy80211"):
+        if os.path.exists(f"/sys/class/net/{iface_clean}/{marker}"):
+            return False
+    return True
+
+
+def enable_promiscuous_mode(
+    sock: socket.socket,
+    interface: Optional[str],
+    sol_packet: Optional[int] = None,
+    packet_add_membership: int = PACKET_ADD_MEMBERSHIP,
+    packet_mr_promisc: int = PACKET_MR_PROMISC,
+) -> Optional[bytes]:
+    """
+    Enables PACKET_MR_PROMISC on ``sock`` if ``interface`` supports safe hardware
+    promiscuous capture (wired Ethernet). Returns the ``packet_mreq`` struct bytes
+    when enabled, or None when skipped or unsupported.
+    """
+    if not is_promiscuous_safe_interface(interface):
+        return None
+    try:
+        ifindex = socket.if_nametoindex(interface)  # type: ignore[arg-type]
+        mreq = struct.pack("IHH8s", ifindex, packet_mr_promisc, 0, b"")
+        level = sol_packet if sol_packet is not None else SOL_PACKET
+        sock.setsockopt(level, packet_add_membership, mreq)
+        return mreq
+    except Exception as e:
+        log.debug("Failed to enable PACKET_MR_PROMISC on %s: %s", interface, e)
+        return None
+
+
+def disable_promiscuous_mode(
+    sock: Optional[socket.socket],
+    mreq: Optional[bytes],
+    sol_packet: Optional[int] = None,
+    packet_drop_membership: int = PACKET_DROP_MEMBERSHIP,
+) -> None:
+    """Drops a previously registered PACKET_MR_PROMISC membership on ``sock``."""
+    if not sock or not mreq:
+        return
+    try:
+        level = sol_packet if sol_packet is not None else SOL_PACKET
+        sock.setsockopt(level, packet_drop_membership, mreq)
+    except Exception as e:
+        log.debug("Failed to drop PACKET_MR_PROMISC membership: %s", e)
 
 
 def safe_execute(action: Callable[[], T], default: T, context: str = "") -> T:

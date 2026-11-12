@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..identifiers.tcp_syn import TcpSynParser
+from ..scanners.net_utils import disable_promiscuous_mode, enable_promiscuous_mode
 
 
 class SynScanEvent:
@@ -328,12 +329,13 @@ class SynScanDetector:
             raw_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
             if self.interface:
                 raw_sock.bind((self.interface, 0))
-                try:
-                    ifindex = socket.if_nametoindex(self.interface)
-                    mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
-                    raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
-                except Exception:
-                    mreq = None
+                mreq = enable_promiscuous_mode(
+                    raw_sock,
+                    self.interface,
+                    sol_packet=self.SOL_PACKET,
+                    packet_add_membership=self.PACKET_ADD_MEMBERSHIP,
+                    packet_mr_promisc=self.PACKET_MR_PROMISC,
+                )
 
             raw_sock.settimeout(0.5)
             start_time = time.time()
@@ -349,11 +351,12 @@ class SynScanDetector:
             pass
         finally:
             if raw_sock:
-                if mreq:
-                    try:
-                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
-                    except Exception:
-                        pass
+                disable_promiscuous_mode(
+                    raw_sock,
+                    mreq,
+                    sol_packet=self.SOL_PACKET,
+                    packet_drop_membership=self.PACKET_DROP_MEMBERSHIP,
+                )
                 try:
                     raw_sock.close()
                 except Exception:
@@ -393,12 +396,13 @@ class SynScanDetector:
             raw_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
             if self.interface:
                 raw_sock.bind((self.interface, 0))
-                try:
-                    ifindex = socket.if_nametoindex(self.interface)
-                    mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
-                    raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
-                except Exception:
-                    mreq = None
+                mreq = enable_promiscuous_mode(
+                    raw_sock,
+                    self.interface,
+                    sol_packet=self.SOL_PACKET,
+                    packet_add_membership=self.PACKET_ADD_MEMBERSHIP,
+                    packet_mr_promisc=self.PACKET_MR_PROMISC,
+                )
 
             raw_sock.settimeout(1.0)
             while self._running:
@@ -413,11 +417,12 @@ class SynScanDetector:
             pass
         finally:
             if raw_sock:
-                if mreq:
-                    try:
-                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
-                    except Exception:
-                        pass
+                disable_promiscuous_mode(
+                    raw_sock,
+                    mreq,
+                    sol_packet=self.SOL_PACKET,
+                    packet_drop_membership=self.PACKET_DROP_MEMBERSHIP,
+                )
                 try:
                     raw_sock.close()
                 except Exception:

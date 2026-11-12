@@ -168,6 +168,52 @@ class TestHardwareDoppelganger(unittest.TestCase):
         self.assertTrue(len(threats) >= 1)
         self.assertIn("Hardware Doppelgänger", threats[0])
 
+    def test_allowed_os_families_permits_wsl_and_blocks_disallowed_os(self):
+        wl_entry = {
+            "name": "Dev Workstation",
+            "baseline_os": "Microsoft Windows 10/11",
+            "baseline_ttl": 128,
+            "allowed_os_families": ["Linux/IoT"],
+        }
+        # WSL2 Linux traffic (TTL=63 -> initial 64, Linux TCP SYN) is allowed
+        threats_wsl = DoppelgangerDetector.check_device(
+            ip="192.168.1.81",
+            mac="11:22:33:44:55:77",
+            display_name="Dev Workstation",
+            observed_ttl=63,
+            current_os="Linux Kernel 4.x - 6.x / Android",
+            whitelist_entry=wl_entry,
+            vendor="Dell Inc.",
+        )
+        self.assertEqual(threats_wsl, [])
+
+        # Switching back to native Windows traffic (TTL=128) does not trigger runtime drift
+        threats_win = DoppelgangerDetector.check_device(
+            ip="192.168.1.81",
+            mac="11:22:33:44:55:77",
+            display_name="Dev Workstation",
+            observed_ttl=128,
+            current_os="Microsoft Windows 10/11",
+            whitelist_entry=wl_entry,
+            vendor="Dell Inc.",
+        )
+        self.assertEqual(threats_win, [])
+
+        # Disallowed OS family (e.g. Apple or Network TTL=255) still triggers
+        threats_apple = DoppelgangerDetector.check_device(
+            ip="192.168.1.81",
+            mac="11:22:33:44:55:77",
+            display_name="Dev Workstation",
+            observed_ttl=255,
+            current_os="Apple Darwin (macOS / iOS)",
+            whitelist_entry=wl_entry,
+            vendor="Dell Inc.",
+            update_baseline=False,
+        )
+        self.assertEqual(len(threats_apple), 2)
+        self.assertIn("MAC Spoofing", threats_apple[0])
+        self.assertIn("OS Stack Masquerade", threats_apple[1])
+
 
 if __name__ == "__main__":
     unittest.main()

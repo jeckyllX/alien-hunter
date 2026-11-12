@@ -88,9 +88,11 @@ class Ipv6DiscoveryScanner:
                 except Exception:
                     pass
 
+    ACTIVE_NDP_STATES = frozenset({"REACHABLE", "DELAY", "PROBE"})
+
     def scan(self, timeout: float = 1.0) -> Dict[str, str]:
         """
-        Executes the IPv6 discovery probe and returns discovered IPv6 link-local addresses.
+        Executes the IPv6 discovery probe and returns active IPv6 link-local addresses.
         Returns mapping: {IPv6_ADDRESS: MAC_ADDRESS}
         """
         devices: Dict[str, str] = {}
@@ -98,7 +100,7 @@ class Ipv6DiscoveryScanner:
         # 1. Trigger network activity to populate neighbor cache
         self._multicast_ping(timeout=timeout)
 
-        # 2. Extract results from kernel neighbor cache (NDP table)
+        # 2. Extract active results from kernel neighbor cache (NDP table)
         try:
             cmd = ["ip", "-6", "-json", "neigh", "show"]
             if self.interface:
@@ -116,7 +118,9 @@ class Ipv6DiscoveryScanner:
                         continue
                     if mac.lower() == "00:00:00:00:00:00":
                         continue
-                    if "FAILED" in state or "INCOMPLETE" in state:
+                    if isinstance(state, str):
+                        state = [state]
+                    if not any(s.upper() in self.ACTIVE_NDP_STATES for s in state if isinstance(s, str)):
                         continue
                     
                     devices[ip] = mac.upper()

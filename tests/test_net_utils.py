@@ -7,9 +7,14 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from alien_hunter.scanners.net_utils import (
+    PACKET_ADD_MEMBERSHIP,
+    PACKET_DROP_MEMBERSHIP,
     bind_socket_to_device,
     create_udp_socket,
+    disable_promiscuous_mode,
+    enable_promiscuous_mode,
     get_subnet_broadcast,
+    is_promiscuous_safe_interface,
 )
 
 
@@ -42,6 +47,40 @@ class TestNetUtils(unittest.TestCase):
         mock_sock = MagicMock()
         res = bind_socket_to_device(mock_sock, None)
         self.assertFalse(res)
+
+    @patch("os.path.exists", return_value=False)
+    def test_is_promiscuous_safe_interface(self, mock_exists):
+        self.assertTrue(is_promiscuous_safe_interface("eth0"))
+        self.assertTrue(is_promiscuous_safe_interface("enp3s0"))
+        self.assertFalse(is_promiscuous_safe_interface("wlan0"))
+        self.assertFalse(is_promiscuous_safe_interface("wlp2s0"))
+        self.assertFalse(is_promiscuous_safe_interface("lo"))
+        self.assertFalse(is_promiscuous_safe_interface("tailscale0"))
+        self.assertFalse(is_promiscuous_safe_interface("wg0"))
+        self.assertFalse(is_promiscuous_safe_interface(None))
+        self.assertFalse(is_promiscuous_safe_interface(""))
+
+    @patch("os.path.exists", return_value=True)
+    def test_is_promiscuous_safe_interface_sysfs_wireless(self, mock_exists):
+        self.assertFalse(is_promiscuous_safe_interface("eth0"))
+
+    @patch("os.path.exists", return_value=False)
+    @patch("socket.if_nametoindex", return_value=2)
+    def test_enable_and_disable_promiscuous_mode(self, mock_ifindex, mock_exists):
+        mock_sock = MagicMock()
+        mreq = enable_promiscuous_mode(mock_sock, "eth0")
+        self.assertIsNotNone(mreq)
+        self.assertEqual(mock_sock.setsockopt.call_count, 1)
+        self.assertEqual(mock_sock.setsockopt.call_args[0][1], PACKET_ADD_MEMBERSHIP)
+
+        disable_promiscuous_mode(mock_sock, mreq)
+        self.assertEqual(mock_sock.setsockopt.call_count, 2)
+        self.assertEqual(mock_sock.setsockopt.call_args[0][1], PACKET_DROP_MEMBERSHIP)
+
+        # Wireless skips setsockopt
+        mock_wifi_sock = MagicMock()
+        self.assertIsNone(enable_promiscuous_mode(mock_wifi_sock, "wlan0"))
+        mock_wifi_sock.setsockopt.assert_not_called()
 
 
 if __name__ == "__main__":

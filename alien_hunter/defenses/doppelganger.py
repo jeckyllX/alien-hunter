@@ -69,9 +69,9 @@ class DoppelgangerDetector:
         """Matches arbitrary text against the canonical OS profile registry."""
         if not text:
             return None
-        text_lower = text.lower()
+        text_lower = text.strip().lower()
         for profile in OS_PROFILES:
-            if any(k in text_lower for k in profile.keywords):
+            if text_lower == profile.family.value.lower() or any(k in text_lower for k in profile.keywords):
                 return profile
         return None
 
@@ -135,6 +135,27 @@ class DoppelgangerDetector:
         return profile.family if profile else None
 
     @classmethod
+    def infer_allowed_os_profiles(
+        cls,
+        whitelist_entry: Optional[Dict[str, Any]] = None,
+    ) -> List[OsProfileDefinition]:
+        """Resolves optional per-device ``allowed_os_families`` (e.g. for WSL2 or VMs)."""
+        if not whitelist_entry:
+            return []
+        raw = whitelist_entry.get("allowed_os_families")
+        if not raw:
+            return []
+        items = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple, set)) else []
+        profiles: List[OsProfileDefinition] = []
+        seen_families = set()
+        for item in items:
+            profile = cls.match_profile(str(item))
+            if profile and profile.family not in seen_families:
+                seen_families.add(profile.family)
+                profiles.append(profile)
+        return profiles
+
+    @classmethod
     def normalize_observed_os(cls, os_str: Optional[str]) -> Optional[OsFamily]:
         """Normalizes an observed fingerprint string into an OsFamily."""
         profile = cls.match_profile(os_str)
@@ -190,11 +211,15 @@ class DoppelgangerDetector:
 
         expected_ttl = cls.infer_expected_ttl(whitelist_entry, vendor=vendor, name=display_name)
         expected_family = cls.infer_expected_os_family(whitelist_entry, vendor=vendor, name=display_name)
+        allowed_profiles = cls.infer_allowed_os_profiles(whitelist_entry)
+        allowed_families = {p.family for p in allowed_profiles}
+        allowed_ttls = {p.expected_ttl.value for p in allowed_profiles}
 
         # 1. TTL Conflict Check
         if observed_ttl is not None and expected_ttl is not None:
             estimated_initial = cls.estimate_initial_ttl(observed_ttl)
-            if estimated_initial != expected_ttl:
+            valid_ttls = {expected_ttl} | allowed_ttls
+            if estimated_initial not in valid_ttls:
                 threats.append(
                     f"CRITICAL: Hardware Doppelgänger / MAC Spoofing on {display_name} ({ip}, MAC: {mac_upper})! "
                     f"Observed stack TTL={observed_ttl} (estimated initial {estimated_initial}) conflicts with "
@@ -205,7 +230,7 @@ class DoppelgangerDetector:
         active_os = current_os or dhcp_os
         observed_family = cls.normalize_observed_os(active_os)
 
-        if expected_family and observed_family:
+        if expected_family and observed_family and observed_family not in allowed_families:
             if cls.is_os_family_conflict(expected_family, observed_family, vendor=vendor):
                 threats.append(
                     f"CRITICAL: Hardware Doppelgänger / OS Stack Masquerade on {display_name} ({ip}, MAC: {mac_upper})! "
@@ -221,7 +246,8 @@ class DoppelgangerDetector:
                 existing = cls._runtime_baselines.get(mac_upper)
                 if existing:
                     prev_ttl = existing.get("estimated_ttl")
-                    if prev_ttl and prev_ttl != est_ttl and not threats:
+                    allowed_runtime_ttls = ({expected_ttl} if expected_ttl is not None else set()) | allowed_ttls
+                    if prev_ttl and prev_ttl != est_ttl and est_ttl not in allowed_runtime_ttls and not threats:
                         threats.append(
                             f"CRITICAL: Hardware Doppelgänger / Runtime Stack Drift on {display_name} ({ip}, MAC: {mac_upper})! "
                             f"Host operating system stack abruptly shifted from initial TTL={prev_ttl} to TTL={est_ttl}. "

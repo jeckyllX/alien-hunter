@@ -13,6 +13,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Set, Tuple, Any
 
+from ..scanners.net_utils import disable_promiscuous_mode, enable_promiscuous_mode
+
 
 class StormEvent:
     """Represents a Layer-2 storm or CAM table flooding security event."""
@@ -269,12 +271,13 @@ class StormGuard:
                 except Exception:
                     pass
 
-                try:
-                    ifindex = socket.if_nametoindex(self.interface)
-                    mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
-                    raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
-                except Exception:
-                    mreq = None
+                mreq = enable_promiscuous_mode(
+                    raw_sock,
+                    self.interface,
+                    sol_packet=self.SOL_PACKET,
+                    packet_add_membership=self.PACKET_ADD_MEMBERSHIP,
+                    packet_mr_promisc=self.PACKET_MR_PROMISC,
+                )
 
             raw_sock.settimeout(0.5)
             start_time = time.time()
@@ -298,11 +301,12 @@ class StormGuard:
             pass
         finally:
             if raw_sock:
-                if mreq:
-                    try:
-                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
-                    except Exception:
-                        pass
+                disable_promiscuous_mode(
+                    raw_sock,
+                    mreq,
+                    sol_packet=self.SOL_PACKET,
+                    packet_drop_membership=self.PACKET_DROP_MEMBERSHIP,
+                )
                 try:
                     raw_sock.close()
                 except Exception:
@@ -355,13 +359,14 @@ class StormGuard:
                 except Exception:
                     pass
 
-                # Enable promiscuous mode to capture frames during switch fail-open
-                try:
-                    ifindex = socket.if_nametoindex(self.interface)
-                    mreq = struct.pack("IHH8s", ifindex, self.PACKET_MR_PROMISC, 0, b"")
-                    raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_ADD_MEMBERSHIP, mreq)
-                except Exception:
-                    mreq = None
+                # Enable promiscuous mode on wired Ethernet to capture frames during switch fail-open
+                mreq = enable_promiscuous_mode(
+                    raw_sock,
+                    self.interface,
+                    sol_packet=self.SOL_PACKET,
+                    packet_add_membership=self.PACKET_ADD_MEMBERSHIP,
+                    packet_mr_promisc=self.PACKET_MR_PROMISC,
+                )
 
             raw_sock.settimeout(0.5)
             while self.running:
@@ -385,11 +390,12 @@ class StormGuard:
             pass
         finally:
             if raw_sock:
-                if mreq:
-                    try:
-                        raw_sock.setsockopt(self.SOL_PACKET, self.PACKET_DROP_MEMBERSHIP, mreq)
-                    except Exception:
-                        pass
+                disable_promiscuous_mode(
+                    raw_sock,
+                    mreq,
+                    sol_packet=self.SOL_PACKET,
+                    packet_drop_membership=self.PACKET_DROP_MEMBERSHIP,
+                )
                 try:
                     raw_sock.close()
                 except Exception:

@@ -22,6 +22,7 @@ from ..scanners.netbios import NetbiosScanner
 from ..scanners.mdns import MdnsScanner
 from ..scanners.ws_discovery import WsDiscoveryScanner
 from ..scanners.ipv6_discovery import Ipv6DiscoveryScanner
+from ..scanners.net_utils import is_promiscuous_safe_interface
 from ..scanners.phantom import PhantomSweeper
 from ..identifiers.vendor import MacVendorResolver
 from ..identifiers.apple import AppleDeviceIdentifier
@@ -347,6 +348,7 @@ class DiscoveryEngine:
         ssdp_data: Optional[Dict[str, Any]],
         nb_data: Optional[Dict[str, Any]],
         phantom_devices: Optional[Dict[str, str]],
+        ipv6_devices: Optional[Dict[str, str]] = None,
     ) -> str:
         """Compiles a comma-separated description of all protocols that observed this host."""
         discovery_methods: List[str] = []
@@ -356,6 +358,8 @@ class DiscoveryEngine:
             discovery_methods.append("Layer-2 ARP Scan")
         if ip in passive_only_ips:
             discovery_methods.append("Passive Frame Sniffer (Promiscuous Mode)")
+        if ipv6_devices and ip in ipv6_devices:
+            discovery_methods.append("IPv6 NDP Discovery")
         if mdns_data:
             discovery_methods.append("mDNS (Multicast DNS)")
         if ws_data:
@@ -710,6 +714,7 @@ class DiscoveryEngine:
             ssdp_data=ssdp_data,
             nb_data=nb_data,
             phantom_devices=phantom_devices,
+            ipv6_devices=ipv6_devices,
         )
 
         aliases = mdns_data.get("aliases", []) if mdns_data else []
@@ -928,17 +933,16 @@ class DiscoveryEngine:
                 interface=net_info.interface,
             )
         )
-        # g) Remote Promiscuous Node Anti-Sniff Test (on deep scan, wired Ethernet only)
-        if deep_scan and active_devices and net_info.interface:
-            if not net_info.interface.startswith(("wl", "wlan", "wifi", "ath", "ra", "wg", "tun", "tap")):
-                threats.extend(
-                    ThreatDetector.check_promiscuous_hosts(
-                        interface=net_info.interface,
-                        local_ip=net_info.local_ip,
-                        local_mac=net_info.local_mac,
-                        target_hosts=active_devices,
-                    )
+        # 7.Remote Promiscuous Node Anti-Sniff Test (on deep scan, wired Ethernet only)
+        if deep_scan and active_devices and is_promiscuous_safe_interface(net_info.interface):
+            threats.extend(
+                ThreatDetector.check_promiscuous_hosts(
+                    interface=net_info.interface,
+                    local_ip=net_info.local_ip,
+                    local_mac=net_info.local_mac,
+                    target_hosts=active_devices,
                 )
+            )
         # h) Wireless Airspace / Evil Twin AP
         if current_ssid:
             threats.extend(ThreatDetector.check_wifi_threats(current_ssid))

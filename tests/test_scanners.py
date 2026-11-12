@@ -10,6 +10,7 @@ from alien_hunter.scanners.sniffer import PassiveFrameSniffer
 from alien_hunter.scanners.ssdp import SsdpScanner
 from alien_hunter.scanners.netbios import NetbiosScanner
 from alien_hunter.scanners.arp import ArpScanner, NativeArpSweeper
+from alien_hunter.scanners.ipv6_discovery import Ipv6DiscoveryScanner
 from alien_hunter.scanners.ports import PortScanner
 from alien_hunter.threats import ThreatDetector
 
@@ -24,7 +25,25 @@ class TestPassiveFrameSniffer(unittest.TestCase):
 
     @patch("socket.socket")
     @patch("socket.if_nametoindex", return_value=3)
-    def test_promiscuous_mode_enabled_and_cleaned_up(self, mock_ifindex, mock_socket_cls):
+    def test_promiscuous_mode_enabled_and_cleaned_up_on_ethernet(self, mock_ifindex, mock_socket_cls):
+        mock_sock = MagicMock()
+        mock_sock.recvfrom.side_effect = TimeoutError()
+        mock_socket_cls.return_value = mock_sock
+
+        sniffer = PassiveFrameSniffer(interface="eth0")
+        result = sniffer.sniff(duration=0.1)
+
+        self.assertIsInstance(result, dict)
+        mock_ifindex.assert_called_once_with("eth0")
+        # Check that setsockopt was called with PACKET_ADD_MEMBERSHIP and then PACKET_DROP_MEMBERSHIP
+        calls = [c[0] for c in mock_sock.setsockopt.call_args_list]
+        self.assertTrue(any(PassiveFrameSniffer.PACKET_ADD_MEMBERSHIP in c for c in calls))
+        self.assertTrue(any(PassiveFrameSniffer.PACKET_DROP_MEMBERSHIP in c for c in calls))
+        mock_sock.close.assert_called_once()
+
+    @patch("socket.socket")
+    @patch("socket.if_nametoindex", return_value=3)
+    def test_promiscuous_mode_skipped_on_wireless(self, mock_ifindex, mock_socket_cls):
         mock_sock = MagicMock()
         mock_sock.recvfrom.side_effect = TimeoutError()
         mock_socket_cls.return_value = mock_sock
@@ -33,11 +52,8 @@ class TestPassiveFrameSniffer(unittest.TestCase):
         result = sniffer.sniff(duration=0.1)
 
         self.assertIsInstance(result, dict)
-        mock_ifindex.assert_called_once_with("wlan0")
-        # Check that setsockopt was called with PACKET_ADD_MEMBERSHIP and then PACKET_DROP_MEMBERSHIP
-        calls = [c[0] for c in mock_sock.setsockopt.call_args_list]
-        self.assertTrue(any(PassiveFrameSniffer.PACKET_ADD_MEMBERSHIP in c for c in calls))
-        self.assertTrue(any(PassiveFrameSniffer.PACKET_DROP_MEMBERSHIP in c for c in calls))
+        mock_ifindex.assert_not_called()
+        mock_sock.setsockopt.assert_not_called()
         mock_sock.close.assert_called_once()
 
 
@@ -249,12 +265,12 @@ class TestArpScanner(unittest.TestCase):
     @patch("subprocess.run")
     @patch.object(NativeArpSweeper, "sweep", return_value={})
     def test_scan_filters_failed_and_stale_neighbors(self, mock_sweep, mock_subproc):
-        # Simulated ip neigh with 1 REACHABLE host, 1 FAILED host, and 1 STALE host
+        # Simulated ip neigh with 1 REACHABLE host, 1 FAILED host, and 1 INCOMPLETE host
         import json
         neigh_json = json.dumps([
-            {"dst": "192.168.1.1", "lladdr": "02:00:00:00:00:01", "state": ["REACHABLE"]},
-            {"dst": "192.0.2.50", "lladdr": "02:00:00:00:00:50", "state": ["FAILED"]},
-            {"dst": "192.0.2.32", "lladdr": "02:00:00:00:00:32", "state": ["INCOMPLETE"]},
+            {"dst": "192.168.1.1", "lladdr": "AA:BB:CC:00:00:01", "state": ["REACHABLE"]},
+            {"dst": "192.168.1.50", "lladdr": "AA:BB:CC:00:00:50", "state": ["FAILED"]},
+            {"dst": "192.168.1.51", "lladdr": "AA:BB:CC:00:00:51", "state": ["INCOMPLETE"]},
         ])
         mock_res = MagicMock()
         mock_res.stdout = neigh_json
@@ -270,19 +286,19 @@ class TestArpScanner(unittest.TestCase):
         devs = scanner.scan()
 
         self.assertIn("192.168.1.1", devs)
-        self.assertNotIn("192.0.2.50", devs)
-        self.assertNotIn("192.0.2.32", devs)
+        self.assertNotIn("192.168.1.50", devs)
+        self.assertNotIn("192.168.1.51", devs)
 
     @patch("subprocess.run")
     @patch.object(NativeArpSweeper, "sweep", return_value={})
     def test_proc_net_arp_requires_atf_com_flag(self, mock_sweep, mock_subproc):
         mock_subproc.side_effect = Exception("ip command unavailable")
 
-        # 192.168.1.10 has 0x2 (ATF_COM - completed), 192.0.2.50 has 0x0 (failed)
+        # 192.168.1.10 has 0x2 (ATF_COM - completed), 192.168.1.50 has 0x0 (failed)
         arp_data = (
             "IP address       HW type     Flags       HW address            Mask     Device\n"
             "192.168.1.10     0x1         0x2         AA:BB:CC:DD:EE:10     *        eth0\n"
-            "192.0.2.50    0x1         0x0         02:00:00:00:00:50     *        eth0\n"
+            "192.168.1.50     0x1         0x0         AA:BB:CC:DD:EE:50     *        eth0\n"
         )
         with patch("builtins.open", unittest.mock.mock_open(read_data=arp_data)):
             scanner = ArpScanner(
@@ -294,7 +310,36 @@ class TestArpScanner(unittest.TestCase):
             devs = scanner.scan()
 
         self.assertIn("192.168.1.10", devs)
-        self.assertNotIn("192.0.2.50", devs)
+        self.assertNotIn("192.168.1.50", devs)
+
+
+class TestIpv6DiscoveryScanner(unittest.TestCase):
+    """Tests IPv6 NDP neighbor table state filtering."""
+
+    @patch("subprocess.run")
+    @patch.object(Ipv6DiscoveryScanner, "_multicast_ping")
+    def test_scan_filters_stale_and_failed_ndp_entries(self, mock_ping, mock_subproc):
+        import json
+        ndp_json = json.dumps([
+            {"dst": "fe80::1", "lladdr": "aa:bb:cc:00:00:01", "state": ["REACHABLE"]},
+            {"dst": "fe80::2", "lladdr": "aa:bb:cc:00:00:02", "state": ["DELAY"]},
+            {"dst": "fe80::3", "lladdr": "aa:bb:cc:00:00:03", "state": ["STALE"]},
+            {"dst": "fe80::4", "lladdr": "aa:bb:cc:00:00:04", "state": ["FAILED"]},
+        ])
+        mock_res = MagicMock()
+        mock_res.stdout = ndp_json
+        mock_res.returncode = 0
+        mock_subproc.return_value = mock_res
+
+        scanner = Ipv6DiscoveryScanner(interface="wlan0")
+        devs = scanner.scan(timeout=0.1)
+
+        self.assertEqual(devs, {
+            "fe80::1": "AA:BB:CC:00:00:01",
+            "fe80::2": "AA:BB:CC:00:00:02",
+        })
+        self.assertNotIn("fe80::3", devs)
+        self.assertNotIn("fe80::4", devs)
 
 
 class TestPortScannerBanner(unittest.TestCase):
