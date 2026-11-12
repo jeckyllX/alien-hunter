@@ -180,6 +180,42 @@ class TestSessionManager(unittest.TestCase):
         self.assertEqual(self.sessions.validate_session(t3), "user3")
         self.assertEqual(self.sessions.validate_session(t4), "user4")
 
+    def test_persistent_session_survives_restart_and_revokes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = os.path.join(tmpdir, "web_sessions.json")
+            sm1 = SessionManager(
+                ttl_seconds=60,
+                persistent_ttl_seconds=3600,
+                session_file=session_file,
+            )
+            ephemeral_token = sm1.create_session("admin", "10.0.0.1", remember_me=False)
+            remembered_token = sm1.create_session("admin", "10.0.0.1", remember_me=True)
+
+            self.assertTrue(os.path.exists(session_file))
+            mode = os.stat(session_file).st_mode & 0o777
+            self.assertEqual(mode, 0o600)
+            with open(session_file, "r", encoding="utf-8") as f:
+                raw = f.read()
+            self.assertNotIn(remembered_token, raw)
+
+            # Simulate service restart with a new SessionManager instance
+            sm2 = SessionManager(
+                ttl_seconds=60,
+                persistent_ttl_seconds=3600,
+                session_file=session_file,
+            )
+            self.assertIsNone(sm2.validate_session(ephemeral_token))
+            self.assertEqual(sm2.validate_session(remembered_token), "admin")
+
+            # Revoking removes from disk as well
+            self.assertTrue(sm2.revoke_session(remembered_token))
+            sm3 = SessionManager(
+                ttl_seconds=60,
+                persistent_ttl_seconds=3600,
+                session_file=session_file,
+            )
+            self.assertIsNone(sm3.validate_session(remembered_token))
+
 
 class TestWebAuthenticator(unittest.TestCase):
     """Tests WebAuthenticator integration with logging and rate limiting."""
@@ -403,6 +439,58 @@ class TestWebServerAuthenticationEndpoints(unittest.TestCase):
             self.assertEqual(res.status, 200)
             data = json.loads(res.read().decode("utf-8"))
             self.assertTrue(data["is_running"])
+
+    def test_remember_me_cookie_and_persistence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = os.path.join(tmpdir, "web_sessions.json")
+            pw_hash = PasswordHasher.hash_password("Secret123!")
+            auth_cfg = {
+                "enabled": True,
+                "username": "admin",
+                "password_hash": pw_hash,
+                "session_ttl_seconds": 300,
+                "persistent_session_ttl_seconds": 2592000,
+                "session_file": session_file,
+            }
+            state = SentinelState()
+            srv1 = LightweightWebServer(state=state, host="127.0.0.1", port=0, auth_config=auth_cfg)
+            self.assertTrue(srv1.start())
+            try:
+                base1 = f"http://127.0.0.1:{srv1.port}"
+                payload = json.dumps({
+                    "username": "admin",
+                    "password": "Secret123!",
+                    "remember_me": True,
+                }).encode("utf-8")
+                req = Request(
+                    f"{base1}/api/auth/login",
+                    data=payload,
+                    headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urlopen(req, timeout=3) as res:
+                    self.assertEqual(res.status, 200)
+                    cookie = res.headers.get("Set-Cookie", "")
+                    self.assertIn("Max-Age=2592000", cookie)
+                    m = re.search(r"ah_session=([^;]+)", cookie)
+                    self.assertIsNotNone(m)
+                    token = m.group(1)
+            finally:
+                srv1.stop()
+
+            # New server instance loading the same session_file should accept the token
+            srv2 = LightweightWebServer(state=state, host="127.0.0.1", port=0, auth_config=auth_cfg)
+            self.assertTrue(srv2.start())
+            try:
+                base2 = f"http://127.0.0.1:{srv2.port}"
+                req = Request(
+                    f"{base2}/api/status",
+                    headers={"User-Agent": "Mozilla/5.0", "Cookie": f"ah_session={token}"},
+                )
+                with urlopen(req, timeout=3) as res:
+                    self.assertEqual(res.status, 200)
+            finally:
+                srv2.stop()
 
 
 if __name__ == "__main__":

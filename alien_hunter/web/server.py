@@ -5,6 +5,7 @@ Provides REST endpoints and static single-page interface with in-memory state lo
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -233,8 +234,14 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
 
         username = str(payload.get("username", "")).strip()
         password = str(payload.get("password", "")).strip()
+        remember_me = bool(payload.get("remember_me", False))
 
-        success, token, err_msg, retry_after = auth.authenticate(username, password, client_ip)
+        success, token, err_msg, retry_after = auth.authenticate(
+            username,
+            password,
+            client_ip,
+            remember_me=remember_me,
+        )
 
         if not success:
             state: Optional[SentinelState] = getattr(self.server, "state", None)
@@ -263,12 +270,13 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
 
         # Success - set cookie
         is_https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        max_age = auth.session_manager.get_session_ttl(remember_me)
         cookie_parts = [
             f"ah_session={token}",
             "Path=/",
             "HttpOnly",
             "SameSite=Strict",
-            f"Max-Age={auth.session_manager.ttl_seconds}",
+            f"Max-Age={max_age}",
         ]
         if is_https:
             cookie_parts.append("Secure")
@@ -498,7 +506,16 @@ class LightweightWebServer:
         self.host = host
         self.port = port
         self.scan_trigger = scan_trigger
-        self.authenticator = WebAuthenticator(auth_config=auth_config, auth_log_path=auth_log_path)
+        session_file: Optional[str] = None
+        if whitelist_path:
+            session_file = os.path.join(os.path.dirname(os.path.abspath(whitelist_path)), "web_sessions.json")
+        elif auth_log_path:
+            session_file = os.path.join(os.path.dirname(os.path.abspath(auth_log_path)), "web_sessions.json")
+        self.authenticator = WebAuthenticator(
+            auth_config=auth_config,
+            auth_log_path=auth_log_path,
+            session_file=session_file,
+        )
         self.server: Optional[AlienHTTPServer] = None
         self.thread: Optional[threading.Thread] = None
 

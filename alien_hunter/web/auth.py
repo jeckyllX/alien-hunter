@@ -8,10 +8,12 @@ thread-safe session token management, and structured Fail2ban logging.
 from collections import deque
 import hashlib
 import hmac
+import json
 import os
 import re
 import secrets
 import sys
+import tempfile
 import threading
 import time
 from typing import Dict, Optional, Tuple, Any
@@ -203,23 +205,99 @@ class AuthRateLimiter:
 
 class SessionManager:
     """
-    In-memory 256-bit token session store with automatic TTL expiration.
-    Zero disk I/O.
+    256-bit token session store with TTL expiration and optional persistent
+    on-disk storage (SHA-256 token digests) for remembered devices.
     """
 
-    def __init__(self, ttl_seconds: int = 86400, max_sessions: int = 200, **kwargs):
+    DEFAULT_PERSISTENT_TTL_SECONDS = 2592000  # 30 days
+
+    def __init__(
+        self,
+        ttl_seconds: int = 86400,
+        persistent_ttl_seconds: int = DEFAULT_PERSISTENT_TTL_SECONDS,
+        max_sessions: int = 200,
+        session_file: Optional[str] = None,
+        **kwargs,
+    ):
         if "session_ttl_seconds" in kwargs:
             ttl_seconds = kwargs["session_ttl_seconds"]
-        self.ttl_seconds = ttl_seconds
+        if "persistent_session_ttl_seconds" in kwargs:
+            persistent_ttl_seconds = kwargs["persistent_session_ttl_seconds"]
+        self.ttl_seconds = int(ttl_seconds)
+        self.persistent_ttl_seconds = int(persistent_ttl_seconds)
         self.max_sessions = max_sessions
+        self.session_file = session_file
         self._lock = threading.Lock()
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._persisted_sessions: Dict[str, Dict[str, Any]] = {}
+        if self.session_file:
+            self._load_persisted_sessions()
 
-    def create_session(self, username: str, ip: str) -> str:
+    @staticmethod
+    def _hash_token(token: str) -> str:
+        """Returns SHA-256 hex digest of a session token for disk storage."""
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _load_persisted_sessions(self) -> None:
+        """Loads non-expired persistent session digests from disk."""
+        if not self.session_file or not os.path.exists(self.session_file):
+            return
+        try:
+            with open(self.session_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            now = time.time()
+            loaded: Dict[str, Dict[str, Any]] = {}
+            for token_hash, entry in data.items():
+                if (
+                    isinstance(token_hash, str)
+                    and isinstance(entry, dict)
+                    and isinstance(entry.get("username"), str)
+                    and float(entry.get("expires", 0)) >= now
+                ):
+                    loaded[token_hash] = {
+                        "username": entry["username"],
+                        "ip": str(entry.get("ip", "")),
+                        "created": float(entry.get("created", now)),
+                        "expires": float(entry["expires"]),
+                    }
+            self._persisted_sessions = loaded
+        except Exception as e:
+            log.debug("Failed loading persisted sessions from %s: %s", self.session_file, e)
+
+    def _save_persisted_sessions(self) -> None:
+        """Atomically writes persistent session digests to disk with 0600 permissions."""
+        if not self.session_file:
+            return
+        try:
+            abs_path = os.path.abspath(self.session_file)
+            parent = os.path.dirname(abs_path)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=".web_sessions_", suffix=".tmp", dir=parent or ".")
+            try:
+                os.chmod(tmp_path, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self._persisted_sessions, f, indent=2)
+                os.replace(tmp_path, abs_path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+        except Exception as e:
+            log.debug("Failed saving persisted sessions to %s: %s", self.session_file, e)
+
+    def get_session_ttl(self, remember_me: bool = False) -> int:
+        """Returns the session TTL in seconds for standard or persistent sessions."""
+        return self.persistent_ttl_seconds if remember_me else self.ttl_seconds
+
+    def create_session(self, username: str, ip: str, remember_me: bool = False) -> str:
         """Generates a secure random session token."""
         token = secrets.token_urlsafe(32)
         now = time.time()
-        expires = now + self.ttl_seconds
+        expires = now + self.get_session_ttl(remember_me)
+        persisted_dirty = False
 
         with self._lock:
             # Evict expired sessions
@@ -227,43 +305,84 @@ class SessionManager:
             for k in expired_keys:
                 del self._sessions[k]
 
+            expired_hashes = [h for h, v in self._persisted_sessions.items() if v["expires"] < now]
+            for h in expired_hashes:
+                del self._persisted_sessions[h]
+                persisted_dirty = True
+
             if len(self._sessions) >= self.max_sessions:
-                # Evict oldest session
                 oldest_key = min(self._sessions.keys(), key=lambda k: self._sessions[k]["expires"])
                 del self._sessions[oldest_key]
+                oldest_hash = self._hash_token(oldest_key)
+                if oldest_hash in self._persisted_sessions:
+                    del self._persisted_sessions[oldest_hash]
+                    persisted_dirty = True
 
-            self._sessions[token] = {
+            while len(self._persisted_sessions) >= self.max_sessions and self._persisted_sessions:
+                oldest_hash = min(self._persisted_sessions.keys(), key=lambda h: self._persisted_sessions[h]["expires"])
+                del self._persisted_sessions[oldest_hash]
+                persisted_dirty = True
+
+            entry = {
                 "username": username,
                 "ip": ip,
                 "created": now,
                 "expires": expires,
             }
+            self._sessions[token] = entry
+
+            if remember_me and self.session_file:
+                self._persisted_sessions[self._hash_token(token)] = dict(entry)
+                persisted_dirty = True
+
+            if persisted_dirty:
+                self._save_persisted_sessions()
 
         return token
 
-    def validate_session(self, token: str) -> Optional[str]:
+    def validate_session(self, token: Optional[str]) -> Optional[str]:
         """Validates token. Returns username if valid; None if expired or invalid."""
         if not token:
             return None
         now = time.time()
         with self._lock:
             sess = self._sessions.get(token)
-            if not sess:
-                return None
-            if sess["expires"] < now:
-                del self._sessions[token]
-                return None
-            return sess["username"]
+            if sess:
+                if sess["expires"] < now:
+                    del self._sessions[token]
+                    token_hash = self._hash_token(token)
+                    if token_hash in self._persisted_sessions:
+                        del self._persisted_sessions[token_hash]
+                        self._save_persisted_sessions()
+                    return None
+                return sess["username"]
+
+            if self._persisted_sessions:
+                token_hash = self._hash_token(token)
+                persisted = self._persisted_sessions.get(token_hash)
+                if persisted:
+                    if persisted["expires"] < now:
+                        del self._persisted_sessions[token_hash]
+                        self._save_persisted_sessions()
+                        return None
+                    return persisted["username"]
+            return None
 
     def revoke_session(self, token: str) -> bool:
-        """Revokes an active session."""
+        """Revokes an active or persisted session."""
         if not token:
             return False
         with self._lock:
+            revoked = False
             if token in self._sessions:
                 del self._sessions[token]
-                return True
-        return False
+                revoked = True
+            token_hash = self._hash_token(token)
+            if token_hash in self._persisted_sessions:
+                del self._persisted_sessions[token_hash]
+                self._save_persisted_sessions()
+                revoked = True
+            return revoked
 
 
 class WebAuthenticator:
@@ -276,6 +395,7 @@ class WebAuthenticator:
         self,
         auth_config: Optional[Dict[str, Any]] = None,
         auth_log_path: Optional[str] = None,
+        session_file: Optional[str] = None,
     ):
         self.config = auth_config or {}
         self.enabled = bool(self.config.get("enabled", False))
@@ -289,8 +409,15 @@ class WebAuthenticator:
             base_delay_seconds=float(self.config.get("base_delay_seconds") or self.config.get("initial_backoff_seconds") or 2.0),
             max_lockout_seconds=float(self.config.get("max_lockout_seconds") or self.config.get("max_backoff_seconds") or 1800.0),
         )
+        resolved_session_file = self.config.get("session_file") or session_file
         self.session_manager = SessionManager(
             ttl_seconds=int(self.config.get("session_ttl_seconds") or self.config.get("ttl_seconds") or 86400),
+            persistent_ttl_seconds=int(
+                self.config.get("persistent_session_ttl_seconds")
+                or self.config.get("persistent_ttl_seconds")
+                or SessionManager.DEFAULT_PERSISTENT_TTL_SECONDS
+            ),
+            session_file=resolved_session_file,
         )
 
     def log_auth_failure(self, username: str, ip: str, reason: str = "invalid_credentials") -> None:
@@ -312,7 +439,13 @@ class WebAuthenticator:
             except Exception as e:
                 log.debug("Failed writing to auth_log_path %s: %s", self.auth_log_path, e)
 
-    def authenticate(self, username: str, password: str, client_ip: str) -> Tuple[bool, Optional[str], Optional[str], int]:
+    def authenticate(
+        self,
+        username: str,
+        password: str,
+        client_ip: str,
+        remember_me: bool = False,
+    ) -> Tuple[bool, Optional[str], Optional[str], int]:
         """
         Authenticates credentials against stored password hash.
         Returns (success, session_token, error_message, retry_after).
@@ -334,7 +467,7 @@ class WebAuthenticator:
 
         if user_match and pw_match:
             self.rate_limiter.record_success(client_ip)
-            token = self.session_manager.create_session(self.username, client_ip)
+            token = self.session_manager.create_session(self.username, client_ip, remember_me=remember_me)
             return True, token, None, 0
         else:
             lockout = self.rate_limiter.record_failure(client_ip)

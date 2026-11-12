@@ -1,6 +1,7 @@
 # Personal device databases and webhooks (NEVER commit personal data)
 known_devices.json
 config.json
+web_sessions.json
 events.jsonl
 *.jsonl
 signatures.json

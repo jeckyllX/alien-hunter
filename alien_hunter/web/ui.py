@@ -166,6 +166,7 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
 .form-group { margin-bottom: 12px; }
 .form-group label { display: block; font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
 .form-group input, .form-group select { width: 100%; padding: 8px 10px; font-size: 0.9rem; }
+input::placeholder { color: var(--text-dim); opacity: 0.45; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 .toast {
   position: fixed;
@@ -500,15 +501,21 @@ tr.clickable-row:hover { background: rgba(6, 182, 212, 0.08); }
         <div style="font-size: 0.78rem; color: var(--text-dim);">Alien Hunter Dashboard</div>
       </div>
     </div>
-    <form id="loginForm" onsubmit="submitLogin(event)">
+    <form id="loginForm" onsubmit="submitLogin(event)" novalidate>
       <div id="loginError" style="display: none; padding: 8px 12px; border-radius: 4px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: #fca5a5; font-size: 0.8rem; margin-bottom: 12px;"></div>
       <div class="form-group">
         <label for="loginUser">Username</label>
-        <input type="text" id="loginUser" required autocomplete="username" placeholder="admin">
+        <input type="text" id="loginUser" required autocomplete="username" placeholder="Enter username">
       </div>
       <div class="form-group">
         <label for="loginPass">Password</label>
-        <input type="password" id="loginPass" required autocomplete="current-password" placeholder="••••••••">
+        <input type="password" id="loginPass" required autocomplete="current-password" placeholder="Enter password">
+      </div>
+      <div class="form-group" style="margin-bottom: 8px;">
+        <label style="display: flex; align-items: center; gap: 8px; font-size: 0.85rem; color: var(--text-dim); cursor: pointer; font-weight: normal;">
+          <input type="checkbox" id="loginRemember" style="width: auto; margin: 0;">
+          Keep this device logged in
+        </label>
       </div>
       <div class="modal-actions" style="margin-top: 18px;">
         <button type="submit" class="btn-primary" id="btnLoginSubmit" style="width: 100%;">Sign In</button>
@@ -1301,8 +1308,18 @@ async function submitLogin(e) {
   e.preventDefault();
   const username = (document.getElementById('loginUser').value || '').trim();
   const password = document.getElementById('loginPass').value || '';
+  const rememberEl = document.getElementById('loginRemember');
+  const remember_me = !!(rememberEl && rememberEl.checked);
   const errEl = document.getElementById('loginError');
   const btn = document.getElementById('btnLoginSubmit');
+
+  if (!username || !password) {
+    if (errEl) {
+      errEl.textContent = !username ? 'Please enter your username.' : 'Please enter your password.';
+      errEl.style.display = 'block';
+    }
+    return;
+  }
 
   if (btn) {
     btn.disabled = true;
@@ -1314,7 +1331,7 @@ async function submitLogin(e) {
     const res = await fetch(`${API_BASE}/api/auth/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
+      body: JSON.stringify({ username, password, remember_me })
     });
     const data = await res.json().catch(() => ({}));
 
