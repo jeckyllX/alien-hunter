@@ -140,9 +140,8 @@ class ArpSelfHealing:
         key = (spoofed_ip, legitimate_mac.upper())
         with self._lock:
             last_time = self._last_heal_times.get(key, 0.0)
-            if now - last_time < self.cooldown_seconds:
+            if last_time and now - last_time < self.cooldown_seconds:
                 return None
-            self._last_heal_times[key] = now
 
         # Construct authoritative Gratuitous ARP reply frame
         frame = self.build_gratuitous_arp(ip=spoofed_ip, mac=legitimate_mac, opcode=2)
@@ -154,18 +153,26 @@ class ArpSelfHealing:
         try:
             if not sock:
                 try:
-                    sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+                    sock = socket.socket(
+                        socket.AF_PACKET, socket.SOCK_RAW, socket.htons(self.ETH_P_ARP)
+                    )
                     opened_internal_sock = True
                     if self.interface:
-                        sock.bind((self.interface, 0))
+                        sock.bind((self.interface, socket.htons(self.ETH_P_ARP)))
                 except Exception:
+                    if opened_internal_sock and sock:
+                        try:
+                            sock.close()
+                        except Exception:
+                            pass
                     sock = None
+                    opened_internal_sock = False
 
             if sock:
                 for i in range(self.burst_count):
                     try:
                         if self.interface:
-                            sock.sendto(frame, (self.interface, 0))
+                            sock.sendto(frame, (self.interface, socket.htons(self.ETH_P_ARP)))
                         else:
                             sock.send(frame)
                         sent_count += 1
@@ -181,6 +188,9 @@ class ArpSelfHealing:
                 except Exception:
                     pass
 
+        if sent_count == 0:
+            return None
+
         action = ArpHealAction(
             spoofed_ip=spoofed_ip,
             legitimate_mac=legitimate_mac,
@@ -191,6 +201,7 @@ class ArpSelfHealing:
         )
 
         with self._lock:
+            self._last_heal_times[key] = now
             self._heal_history.append(action)
 
         return action

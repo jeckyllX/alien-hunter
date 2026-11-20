@@ -5,7 +5,9 @@ by comparing live TCP/IP stack fingerprints (TTL, TCP window sizes, TCP options,
 and DHCP Option 55 parameter lists) against established device baselines.
 """
 
+import collections
 from dataclasses import dataclass
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,8 +23,14 @@ class OsProfileDefinition:
     keywords: Tuple[str, ...]
 
 
-# Canonical, declarative OS profile registry (single source of truth)
+# Canonical, declarative OS profile registry (single source of truth).
+# NETWORK precedes APPLE so "Cisco IOS" matches NETWORK rather than Apple "ios".
 OS_PROFILES: Tuple[OsProfileDefinition, ...] = (
+    OsProfileDefinition(
+        family=OsFamily.NETWORK,
+        expected_ttl=StackTtl.NETWORK,
+        keywords=("cisco", "juniper", "arista", "solaris", "fortinet", "mikrotik"),
+    ),
     OsProfileDefinition(
         family=OsFamily.WINDOWS,
         expected_ttl=StackTtl.WINDOWS,
@@ -47,11 +55,6 @@ OS_PROFILES: Tuple[OsProfileDefinition, ...] = (
         expected_ttl=StackTtl.UNIX,
         keywords=("freebsd", "openbsd", "netbsd", "pfsense", "opnsense", "truenas"),
     ),
-    OsProfileDefinition(
-        family=OsFamily.NETWORK,
-        expected_ttl=StackTtl.NETWORK,
-        keywords=("cisco", "juniper", "arista", "solaris", "fortinet", "mikrotik"),
-    ),
 )
 
 
@@ -61,8 +64,9 @@ class DoppelgangerDetector:
     device baselines to detect identity hijacking and MAC address cloning.
     """
 
+    MAX_RUNTIME_BASELINES = 4096
     _lock = threading.Lock()
-    _runtime_baselines: Dict[str, Dict[str, Any]] = {}
+    _runtime_baselines: "collections.OrderedDict[str, Dict[str, Any]]" = collections.OrderedDict()
 
     @classmethod
     def match_profile(cls, text: Optional[str]) -> Optional[OsProfileDefinition]:
@@ -71,8 +75,14 @@ class DoppelgangerDetector:
             return None
         text_lower = text.strip().lower()
         for profile in OS_PROFILES:
-            if text_lower == profile.family.value.lower() or any(k in text_lower for k in profile.keywords):
+            if text_lower == profile.family.value.lower():
                 return profile
+            for k in profile.keywords:
+                if len(k) <= 4:
+                    if re.search(rf"(?<![a-z0-9]){re.escape(k)}(?![a-z0-9])", text_lower):
+                        return profile
+                elif k in text_lower:
+                    return profile
         return None
 
     @classmethod
@@ -171,10 +181,16 @@ class DoppelgangerDetector:
         """
         Evaluates whether an observed OS family conflicts with the expected family.
         Cross-tolerance between Apple and Linux/IoT is permitted unless the vendor is explicitly Apple.
-        Windows vs Unix-like OS is always considered a hard conflict.
+        Windows vs Unix-like OS and Network appliance vs host OS are hard conflicts.
         """
         if expected == observed:
             return False
+
+        # Network OS conflicts with any non-network concrete OS family
+        concrete_host_families = (OsFamily.WINDOWS, OsFamily.APPLE, OsFamily.LINUX_IOT, OsFamily.BSD)
+        if (expected == OsFamily.NETWORK and observed in concrete_host_families) or \
+           (observed == OsFamily.NETWORK and expected in concrete_host_families):
+            return True
 
         # Windows vs Unix-like is always a hard conflict
         if (expected == OsFamily.WINDOWS and observed in (OsFamily.APPLE, OsFamily.LINUX_IOT, OsFamily.BSD)) or \
@@ -245,6 +261,7 @@ class DoppelgangerDetector:
             with cls._lock:
                 existing = cls._runtime_baselines.get(mac_upper)
                 if existing:
+                    cls._runtime_baselines.move_to_end(mac_upper)
                     prev_ttl = existing.get("estimated_ttl")
                     allowed_runtime_ttls = ({expected_ttl} if expected_ttl is not None else set()) | allowed_ttls
                     if prev_ttl and prev_ttl != est_ttl and est_ttl not in allowed_runtime_ttls and not threats:
@@ -254,6 +271,8 @@ class DoppelgangerDetector:
                             f"Indicates rogue device took over trusted MAC address!"
                         )
                 else:
+                    if len(cls._runtime_baselines) >= cls.MAX_RUNTIME_BASELINES:
+                        cls._runtime_baselines.popitem(last=False)
                     cls._runtime_baselines[mac_upper] = {
                         "estimated_ttl": est_ttl,
                         "os_family": observed_family,

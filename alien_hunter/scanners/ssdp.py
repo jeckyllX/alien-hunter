@@ -10,6 +10,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional
+from ..http_utils import read_bounded, safe_urlopen
 from .net_utils import create_udp_socket, get_subnet_broadcast
 
 
@@ -129,8 +130,8 @@ class SsdpScanner:
         if fetch_details:
             for ip, info in results.items():
                 location = info.get("location")
-                if location and location.startswith("http://"):
-                    desc = self._fetch_device_descriptor(location)
+                if location and location.lower().startswith("http://"):
+                    desc = self._fetch_device_descriptor(location, expected_ip=ip)
                     if desc:
                         if desc.get("device_name"):
                             info["device_name"] = desc["device_name"]
@@ -155,7 +156,11 @@ class SsdpScanner:
         return headers
 
     @staticmethod
-    def _fetch_device_descriptor(url: str, timeout: float = 0.8) -> Optional[Dict[str, str]]:
+    def _fetch_device_descriptor(
+        url: str,
+        timeout: float = 0.8,
+        expected_ip: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
         """
         Fetches and extracts metadata (<friendlyName>, <manufacturer>, <modelName>)
         from an advertised UPnP XML device description descriptor.
@@ -165,9 +170,17 @@ class SsdpScanner:
                 url,
                 headers={"User-Agent": "AlienHunter/2.0 SSDP-Probe"},
             )
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            with safe_urlopen(
+                req,
+                timeout=timeout,
+                allowed_schemes=("http",),
+                allow_redirects=False,
+                allow_proxies=False,
+                expected_host_ip=expected_ip,
+                reject_loopback_and_metadata=True,
+            ) as response:
                 if response.status == 200:
-                    xml_content = response.read(16384)
+                    xml_content = read_bounded(response, 65536)
                     root = ET.fromstring(xml_content)
 
                     # Scan for tags regardless of XML namespace

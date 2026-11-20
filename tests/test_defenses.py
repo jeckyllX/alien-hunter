@@ -894,6 +894,100 @@ class TestArpPoisonGuard(unittest.TestCase):
         self.assertIn("ARP Cache Poisoning", threats[0])
 
 
+class TestDefenseHardeningRegressions(unittest.TestCase):
+    """Regression tests for defense hardening fixes."""
+
+    def test_arp_self_healing_failed_send_does_not_burn_cooldown(self):
+        from alien_hunter.defenses.arp_healing import ArpSelfHealing
+
+        bad_sock = MagicMock()
+        bad_sock.send.side_effect = OSError("Network down")
+        healer = ArpSelfHealing(interface=None, burst_count=2, burst_interval=0.0, cooldown_seconds=10.0)
+        act_fail = healer.heal(
+            spoofed_ip="198.51.100.1",
+            legitimate_mac="02:00:00:00:00:01",
+            attacker_mac="02:00:00:00:00:99",
+            now=1000.0,
+            raw_socket=bad_sock,
+        )
+        self.assertIsNone(act_fail)
+        self.assertEqual(healer.get_healing_history(), [])
+
+        good_sock = MagicMock()
+        act_ok = healer.heal(
+            spoofed_ip="198.51.100.1",
+            legitimate_mac="02:00:00:00:00:01",
+            attacker_mac="02:00:00:00:00:99",
+            now=1001.0,
+            raw_socket=good_sock,
+        )
+        self.assertIsNotNone(act_ok)
+        self.assertEqual(act_ok.frames_sent, 2)
+
+    def test_arp_poison_guard_cooldown_does_not_fall_through_to_ip_mac_flip(self):
+        guard = ArpPoisonGuard(
+            gateway_ip="198.51.100.1",
+            gateway_mac="02:00:00:00:00:01",
+            trusted_ip_mac_map={"198.51.100.1": "02:00:00:00:00:01"},
+            alert_cooldown=30.0,
+            self_healing_enabled=False,
+        )
+        pkt = TestArpPoisonGuard._make_arp_frame(
+            eth_src="02:00:00:00:00:99",
+            eth_dst="FF:FF:FF:FF:FF:FF",
+            op=2,
+            sender_mac="02:00:00:00:00:99",
+            sender_ip="198.51.100.1",
+            target_mac="00:00:00:00:00:00",
+            target_ip="198.51.100.1",
+        )
+        ev1 = guard.process_packet(pkt, now=100.0)
+        self.assertIsNotNone(ev1)
+        self.assertEqual(ev1.threat_type, "GATEWAY_POISONING")
+        ev2 = guard.process_packet(pkt, now=101.0)
+        self.assertIsNone(ev2)
+
+    def test_honey_port_remote_alien_hunter_ua_triggers_alert(self):
+        test_port = 19559
+        listener = HoneyPortListener(ports=[test_port], bind_host="127.0.0.1")
+        bound = listener.start()
+        self.assertIn(test_port, bound)
+        try:
+            with patch("alien_hunter.defenses.honey_port.ipaddress.ip_address") as mock_ip:
+                mock_ip.return_value.is_loopback = False
+                client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client.connect(("127.0.0.1", test_port))
+                client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: AlienHunter/1.0\r\n\r\n")
+                client.close()
+                time.sleep(0.2)
+                threats = listener.get_threat_strings()
+            self.assertGreaterEqual(len(threats), 1)
+        finally:
+            listener.stop()
+
+    def test_port_drift_empty_ports_baseline_bare_critical_and_dual_alerts(self):
+        threats = PortDriftTracker.check_device_drift(
+            ip="198.51.100.40",
+            mac="02:00:00:00:00:40",
+            display_name="Hardened Appliance",
+            current_open_ports=["23", "8080/HTTP"],
+            whitelist_entry={"name": "Hardened Appliance", "ports": [], "baseline_ports": ["8080/HTTP"]},
+            cached_baseline=["23", "8080/HTTP"],
+        )
+        self.assertEqual(len(threats), 2)
+        self.assertTrue(any("High-Risk Port Drift" in t and "23" in t for t in threats))
+        self.assertTrue(any("WARNING: Port Drift" in t and "8080/HTTP" in t for t in threats))
+
+    def test_dns_integrity_parses_compressed_qname_without_off_by_one(self):
+        header = struct.pack("!HHHHHH", 0x4242, 0x8180, 1, 1, 0, 0)
+        # Question starts at offset 12: use compressed pointer \xC0\x0C + QTYPE=1, QCLASS=1
+        question = b"\xc0\x0c" + struct.pack("!HH", 1, 1)
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + socket.inet_aton("198.51.100.5")
+        rcode, ips = DnsIntegrityAuditor._parse_dns_a_response(header + question + answer, 0x4242)
+        self.assertEqual(rcode, 0)
+        self.assertEqual(ips, ["198.51.100.5"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

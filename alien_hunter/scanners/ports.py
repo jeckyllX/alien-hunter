@@ -7,6 +7,7 @@ Supports flexible port ranges, multi-tier scanning, banner grabbing, and TLS cer
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import ipaddress
 import os
 import re
 import socket
@@ -14,6 +15,8 @@ import ssl
 import tempfile
 import urllib.request
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+
+from ..http_utils import read_bounded, safe_urlopen
 
 
 @dataclass(frozen=True)
@@ -141,10 +144,10 @@ def parse_port_specs(specs: Union[str, Iterable[int], Iterable[str]]) -> List[in
       - [80, 443, 8080]
       - ["80", "443-445"]
     """
-    if isinstance(specs, (list, tuple, set)):
-        raw_str = ",".join(str(s) for s in specs)
+    if isinstance(specs, (str, bytes)):
+        raw_str = specs.decode("utf-8", errors="ignore") if isinstance(specs, bytes) else specs
     else:
-        raw_str = str(specs)
+        raw_str = ",".join(str(s) for s in specs)
 
     parsed_ports: Set[int] = set()
     tokens = [t.strip() for t in raw_str.split(",") if t.strip()]
@@ -175,8 +178,28 @@ def parse_port_specs(specs: Union[str, Iterable[int], Iterable[str]]) -> List[in
 class PortScanner:
     """Probes hosts for open network services and evaluates threat signatures."""
 
-    def __init__(self, timeout: float = 0.3):
+    def __init__(self, timeout: float = 0.3, interface: Optional[str] = None):
         self.timeout = timeout
+        self.interface = interface
+
+    def _socket_addr(self, ip: str, port: int):
+        """Returns a 2-tuple or IPv6 link-local 4-tuple (ip, port, 0, scope_id)."""
+        if "%" in ip:
+            host, zone = ip.split("%", 1)
+            try:
+                scope_id = int(zone) if zone.isdigit() else socket.if_nametoindex(zone)
+                return (host, port, 0, scope_id)
+            except OSError:
+                return (host, port, 0, 0)
+        if ":" in ip:
+            try:
+                ip_obj = ipaddress.ip_address(ip)
+                if ip_obj.is_link_local and self.interface:
+                    scope_id = socket.if_nametoindex(self.interface)
+                    return (ip, port, 0, scope_id)
+            except (ValueError, OSError):
+                pass
+        return (ip, port)
 
     def check_port(self, ip: str, port: int) -> bool:
         """Attempts a quick TCP handshake on target IP and port."""
@@ -184,7 +207,7 @@ class PortScanner:
             family = socket.AF_INET6 if ":" in ip else socket.AF_INET
             with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.settimeout(self.timeout)
-                return s.connect_ex((ip, port)) == 0
+                return s.connect_ex(self._socket_addr(ip, port)) == 0
         except Exception:
             return False
 
@@ -199,7 +222,7 @@ class PortScanner:
             family = socket.AF_INET6 if ":" in ip else socket.AF_INET
             with socket.socket(family, socket.SOCK_STREAM) as s:
                 s.settimeout(timeout)
-                s.connect((ip, port))
+                s.connect(self._socket_addr(ip, port))
                 greeting = s.recv(512)
                 if greeting:
                     text = greeting.decode("utf-8", errors="ignore").strip()
@@ -213,12 +236,19 @@ class PortScanner:
 
         # 2. Generic HTTP probe
         try:
-            host_str = f"[{ip}]" if ":" in ip else ip
+            host_clean = ip.split("%", 1)[0]
+            host_str = f"[{host_clean}]" if ":" in host_clean else host_clean
             url = f"http://{host_str}:{port}/"
             req = urllib.request.Request(url, headers={"User-Agent": "AlienHunter/1.0"}, method="GET")
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with safe_urlopen(
+                req,
+                timeout=timeout,
+                allowed_schemes=("http", "https"),
+                allow_redirects=False,
+                allow_proxies=False,
+            ) as resp:
                 server = resp.headers.get("Server", "").strip()
-                body = resp.read(2048).decode("utf-8", errors="ignore")
+                body = read_bounded(resp, 16384).decode("utf-8", errors="ignore")
                 title_match = re.search(r"<title[^>]*>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
                 title = title_match.group(1).strip() if title_match else ""
 
@@ -260,7 +290,19 @@ class PortScanner:
         """
         tmp_path = None
         try:
-            pem_cert = ssl.get_server_certificate((ip, port), timeout=timeout)
+            addr = self._socket_addr(ip, port)
+            if len(addr) == 4:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect(addr)
+                    with ctx.wrap_socket(sock, server_hostname=addr[0]) as ssock:
+                        der = ssock.getpeercert(binary_form=True)
+                        pem_cert = ssl.DER_cert_to_PEM_cert(der) if der else ""
+            else:
+                pem_cert = ssl.get_server_certificate((ip, port), timeout=timeout)
             if not pem_cert:
                 return None
 

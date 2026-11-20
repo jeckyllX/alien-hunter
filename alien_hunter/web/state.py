@@ -4,6 +4,7 @@ Maintains live daemon state, defense statuses, and discovered device inventories
 with thread-safe access and zero disk I/O.
 """
 
+import copy
 import ipaddress
 import re
 import threading
@@ -25,6 +26,8 @@ class SentinelState:
         self.interval: int = interval
         self.is_running: bool = True
         self.is_scanning: bool = False
+        self.scan_id: int = 0
+        self.completed_scan_id: int = 0
         self.active_defenses: Dict[str, Any] = {}
         self.network_info: Dict[str, Any] = {}
         self.trusted_devices: List[Dict[str, Any]] = []
@@ -38,6 +41,12 @@ class SentinelState:
     def set_scanning(self, scanning: bool = True):
         with self._lock:
             self.is_scanning = scanning
+
+    def begin_triggered_scan(self) -> int:
+        with self._lock:
+            self.scan_id += 1
+            self.is_scanning = True
+            return self.scan_id
 
     @staticmethod
     def _ip_rank(ip_str: str, subnet_cidr: Optional[str] = None) -> int:
@@ -128,10 +137,14 @@ class SentinelState:
         network_info: Optional[Any] = None,
         active_defenses: Optional[Dict[str, Any]] = None,
         ai_posture: Optional[Any] = None,
+        completed_scan_id: Optional[int] = None,
     ):
         """Updates live inventory, telemetry, and records security timeline events."""
         with self._lock:
-            self.is_scanning = False
+            if completed_scan_id is not None:
+                self.completed_scan_id = max(self.completed_scan_id, completed_scan_id)
+            if self.completed_scan_id >= self.scan_id:
+                self.is_scanning = False
             is_subsequent_scan = (self.last_scan_time > 0)
             self.last_scan_time = time.time()
 
@@ -201,7 +214,7 @@ class SentinelState:
                 is_hw_mac = bool(
                     mac_upper
                     and not mac_upper.startswith("N/A")
-                    and re.match(r"^([0-9A-FA-F]{2}[:-]){5}([0-9A-FA-F]{2})$", mac_upper)
+                    and re.match(r"^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$", mac_upper)
                 )
 
                 if dev_dict.get("trusted"):
@@ -517,6 +530,8 @@ class SentinelState:
             return {
                 "is_running": self.is_running,
                 "is_scanning": self.is_scanning,
+                "scan_id": self.scan_id,
+                "completed_scan_id": self.completed_scan_id,
                 "uptime_seconds": uptime_seconds,
                 "uptime_human": self._format_uptime(uptime_seconds),
                 "last_scan_time": self.last_scan_time,
@@ -540,9 +555,9 @@ class SentinelState:
         """Returns JSON-serializable lists of trusted and alien devices."""
         with self._lock:
             return {
-                "trusted": list(self.trusted_devices),
-                "alien": list(self.alien_devices),
-                "ai_posture": dict(self.ai_posture) if isinstance(self.ai_posture, dict) else None,
+                "trusted": copy.deepcopy(self.trusted_devices),
+                "alien": copy.deepcopy(self.alien_devices),
+                "ai_posture": copy.deepcopy(self.ai_posture) if isinstance(self.ai_posture, dict) else None,
             }
 
     def get_events_payload(
@@ -582,13 +597,13 @@ class SentinelState:
             "is_alien": getattr(dev, "is_alien", False),
             "is_randomized": getattr(dev, "is_randomized", False),
             "is_apple": getattr(dev, "is_apple", False),
-            "open_ports": getattr(dev, "open_ports", []),
-            "ports": getattr(dev, "open_ports", []),
-            "threats": getattr(dev, "threats", []),
-            "notes": getattr(dev, "notes", []),
-            "mdns_services": getattr(dev, "mdns_services", []),
-            "ws_types": getattr(dev, "ws_types", []),
-            "aliases": getattr(dev, "aliases", []),
+            "open_ports": list(getattr(dev, "open_ports", []) or []),
+            "ports": list(getattr(dev, "open_ports", []) or []),
+            "threats": list(getattr(dev, "threats", []) or []),
+            "notes": list(getattr(dev, "notes", []) or []),
+            "mdns_services": list(getattr(dev, "mdns_services", []) or []),
+            "ws_types": list(getattr(dev, "ws_types", []) or []),
+            "aliases": list(getattr(dev, "aliases", []) or []),
             "discovery_method": getattr(dev, "discovery_method", "Layer-2 ARP Scan"),
             "last_seen": getattr(dev, "last_seen", None) or None,
             "dhcp_fingerprint": getattr(dev, "dhcp_fingerprint", None),

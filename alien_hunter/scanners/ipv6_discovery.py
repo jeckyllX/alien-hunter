@@ -10,7 +10,7 @@ import socket
 import struct
 import subprocess
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 
 class Ipv6DiscoveryScanner:
@@ -28,11 +28,12 @@ class Ipv6DiscoveryScanner:
         # Type=128, Code=0, Checksum=0 (kernel computes), Identifier, Sequence
         return struct.pack("!BBHHH", cls.ICMPV6_ECHO_REQUEST, 0, 0, ident, seq)
 
-    def _multicast_ping(self, timeout: float = 1.0) -> None:
+    def _multicast_ping(self, timeout: float = 1.0) -> Set[str]:
         """
         Transmits ICMPv6 Echo Requests to the all-nodes multicast address.
-        This forces IPv6-capable devices to respond, populating the kernel neighbor cache.
+        Returns confirmed responder IPv6 addresses from Echo Replies.
         """
+        responders: Set[str] = set()
         sock = None
         try:
             # Requires root / CAP_NET_RAW
@@ -63,30 +64,40 @@ class Ipv6DiscoveryScanner:
                     pass
                 time.sleep(0.1)
 
-            # Briefly read to let the kernel process the incoming replies
+            # Collect ICMPv6 Echo Reply (type 129) peer addresses
             start = time.time()
             while time.time() - start < timeout:
                 try:
-                    sock.recvfrom(2048)
+                    data, addr = sock.recvfrom(2048)
+                    if data and data[0] == 129 and isinstance(addr, tuple) and addr:
+                        responders.add(str(addr[0]).split("%", 1)[0])
                 except socket.timeout:
                     continue
                 except Exception:
                     break
 
         except (PermissionError, OSError):
-            # Fallback to system ping6 if raw sockets fail
-            try:
-                cmd = ["ping6", "-c", "2", "-I", self.interface] if self.interface else ["ping6", "-c", "2"]
-                cmd.append(self.ALL_NODES_MULTICAST)
-                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 1)
-            except Exception:
-                pass
+            # Fallback to system ping -6 / ping6 when interface is set
+            if self.interface:
+                for cmd in (
+                    ["ping", "-6", "-c", "2", "-I", self.interface, self.ALL_NODES_MULTICAST],
+                    ["ping6", "-c", "2", "-I", self.interface, self.ALL_NODES_MULTICAST],
+                ):
+                    try:
+                        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout + 1)
+                        if res.returncode == 0:
+                            break
+                    except FileNotFoundError:
+                        continue
+                    except Exception:
+                        break
         finally:
             if sock:
                 try:
                     sock.close()
                 except Exception:
                     pass
+        return responders
 
     ACTIVE_NDP_STATES = frozenset({"REACHABLE", "DELAY", "PROBE"})
 
@@ -97,8 +108,8 @@ class Ipv6DiscoveryScanner:
         """
         devices: Dict[str, str] = {}
 
-        # 1. Trigger network activity to populate neighbor cache
-        self._multicast_ping(timeout=timeout)
+        # 1. Trigger network activity to populate neighbor cache and collect live replies
+        live_responders = self._multicast_ping(timeout=timeout) or set()
 
         # 2. Extract active results from kernel neighbor cache (NDP table)
         try:
@@ -120,7 +131,11 @@ class Ipv6DiscoveryScanner:
                         continue
                     if isinstance(state, str):
                         state = [state]
-                    if not any(s.upper() in self.ACTIVE_NDP_STATES for s in state if isinstance(s, str)):
+                    upper_states = {s.upper() for s in state if isinstance(s, str)}
+                    ip_clean = str(ip).split("%", 1)[0]
+                    is_active = bool(upper_states & self.ACTIVE_NDP_STATES)
+                    is_confirmed_stale = ("STALE" in upper_states) and (ip_clean in live_responders)
+                    if not (is_active or is_confirmed_stale):
                         continue
                     
                     devices[ip] = mac.upper()

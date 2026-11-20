@@ -197,6 +197,11 @@ class TestPhantomCrossSubnetSweeper(unittest.TestCase):
         self.assertIn("10.50.1.99", threats[0])
         self.assertIn("AA:BB:CC:DD:EE:FF", threats[0])
 
+    def test_phantom_sweeper_ignores_special_addresses(self):
+        sweeper = PhantomSweeper(interface="eth0", subnet_cidr="192.168.1.0/24")
+        for special_ip in ("0.0.0.0", "127.0.0.1", "224.0.0.251", "255.255.255.255"):
+            self.assertFalse(sweeper.is_out_of_subnet(special_ip, "192.168.1.0/24"))
+
 
 if __name__ == "__main__":
     unittest.main()

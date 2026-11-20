@@ -8,6 +8,8 @@ from collections import deque
 from dataclasses import dataclass, asdict
 import json
 import os
+import stat
+import tempfile
 import threading
 import time
 from typing import Dict, Any, List, Optional
@@ -44,6 +46,7 @@ class EventManager:
         self.log_path = log_path
         self.max_memory_entries = max_memory_entries
         self.max_log_bytes = max_log_bytes
+        self._next_compact_bytes = max_log_bytes
         self._lock = threading.Lock()
         self._events: deque = deque(maxlen=max_memory_entries)
 
@@ -55,19 +58,20 @@ class EventManager:
         if not self.log_path or not os.path.exists(self.log_path):
             return
         try:
-            loaded: List[Dict[str, Any]] = []
+            recent: deque = deque(maxlen=self.max_memory_entries)
             with open(self.log_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        loaded.append(json.loads(line))
+                        ev = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(ev, dict):
+                        recent.append(ev)
             with self._lock:
-                for ev in loaded[-self.max_memory_entries:]:
-                    self._events.append(ev)
+                self._events.extend(recent)
         except Exception:
             pass
 
@@ -113,7 +117,7 @@ class EventManager:
                         f.write(json.dumps(event_data) + "\n")
 
                     # Check for log compaction if file exceeds maximum size
-                    if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > self.max_log_bytes:
+                    if os.path.exists(self.log_path) and os.path.getsize(self.log_path) > self._next_compact_bytes:
                         self._compact_log_file()
                 except Exception:
                     pass
@@ -122,15 +126,38 @@ class EventManager:
 
     def _compact_log_file(self):
         """Compacts the JSONL file to retain the most recent max_memory_entries atomically."""
+        if not self.log_path:
+            return
+        tmp_path = None
         try:
-            tmp_path = self.log_path + ".tmp"
+            abs_path = os.path.abspath(self.log_path)
+            parent = os.path.dirname(abs_path)
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            target_mode = (
+                stat.S_IMODE(os.stat(abs_path).st_mode)
+                if os.path.exists(abs_path)
+                else 0o600
+            )
             events_to_keep = list(self._events)
-            with open(tmp_path, "w", encoding="utf-8") as f:
+            fd, tmp_path = tempfile.mkstemp(prefix=".events_tmp_", suffix=".jsonl", dir=parent or ".")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), target_mode)
                 for ev in events_to_keep:
                     f.write(json.dumps(ev) + "\n")
-            os.replace(tmp_path, self.log_path)
+                f.flush()
+            os.replace(tmp_path, abs_path)
+            compacted_size = os.path.getsize(abs_path)
+            if self.max_log_bytes >= 4096 and compacted_size >= self.max_log_bytes:
+                self._next_compact_bytes = int(compacted_size * 1.5)
+            else:
+                self._next_compact_bytes = self.max_log_bytes
         except Exception:
-            pass
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
     def get_events(
         self,

@@ -56,7 +56,13 @@ class PhantomSweeper:
             return False
         try:
             ip_obj = ipaddress.ip_address(ip)
-            if ip_obj.version != 4 or ip_obj.is_multicast or ip_obj.is_loopback or ip_obj.is_unspecified:
+            if (
+                ip_obj.version != 4
+                or ip_obj.is_multicast
+                or ip_obj.is_loopback
+                or ip_obj.is_unspecified
+                or ip_obj == ipaddress.IPv4Address("255.255.255.255")
+            ):
                 return False
             net_obj = ipaddress.ip_network(subnet_cidr, strict=False)
             return ip_obj not in net_obj
@@ -120,6 +126,13 @@ class PhantomSweeper:
                         src_ip = socket.inet_ntoa(pkt[26:30])
                         try:
                             ip_obj = ipaddress.ip_address(src_ip)
+                            if (
+                                ip_obj.is_unspecified
+                                or ip_obj.is_loopback
+                                or ip_obj.is_multicast
+                                or ip_obj == ipaddress.IPv4Address("255.255.255.255")
+                            ):
+                                continue
                             # Must be private/link-local to avoid logging routed internet traffic
                             if (ip_obj.is_private or ip_obj.is_link_local) and ip_obj not in self._local_network:
                                 phantom_devices[src_ip] = src_mac.upper()

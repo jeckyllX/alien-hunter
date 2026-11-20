@@ -153,17 +153,11 @@ class AuthRateLimiter:
                 retry_after = max(1, int(locked_until - now))
                 return False, retry_after
 
-            # 2. Prune sliding window
+            # 2. Prune sliding window; reset consecutive failure count if window emptied
             self._prune_expired_window(data, now)
-
-            # 3. Check threshold
-            if len(data["failures"]) >= self.max_attempts:
-                # Lockout window remaining
-                consec = data.get("consecutive_failures", self.max_attempts)
-                exponent = max(0, consec - self.max_attempts)
-                lock_duration = min(self.max_lockout_seconds, self.base_delay_seconds * (2 ** exponent))
-                data["locked_until"] = now + lock_duration
-                return False, max(1, int(lock_duration))
+            if not data["failures"]:
+                data["consecutive_failures"] = 0
+                data["locked_until"] = 0.0
 
             return True, 0
 
@@ -185,6 +179,8 @@ class AuthRateLimiter:
             )
             data["last_seen"] = now
             self._prune_expired_window(data, now)
+            if not data["failures"]:
+                data["consecutive_failures"] = 0
             data["failures"].append(now)
             data["consecutive_failures"] += 1
 
@@ -250,17 +246,19 @@ class SessionManager:
             now = time.time()
             loaded: Dict[str, Dict[str, Any]] = {}
             for token_hash, entry in data.items():
-                if (
-                    isinstance(token_hash, str)
-                    and isinstance(entry, dict)
-                    and isinstance(entry.get("username"), str)
-                    and float(entry.get("expires", 0)) >= now
-                ):
+                if not (isinstance(token_hash, str) and isinstance(entry, dict) and isinstance(entry.get("username"), str)):
+                    continue
+                try:
+                    expires = float(entry.get("expires", 0))
+                    created = float(entry.get("created", now))
+                except (ValueError, TypeError):
+                    continue
+                if expires >= now:
                     loaded[token_hash] = {
                         "username": entry["username"],
                         "ip": str(entry.get("ip", "")),
-                        "created": float(entry.get("created", now)),
-                        "expires": float(entry["expires"]),
+                        "created": created,
+                        "expires": expires,
                     }
             self._persisted_sessions = loaded
         except Exception as e:
@@ -277,8 +275,8 @@ class SessionManager:
                 os.makedirs(parent, exist_ok=True)
             fd, tmp_path = tempfile.mkstemp(prefix=".web_sessions_", suffix=".tmp", dir=parent or ".")
             try:
-                os.chmod(tmp_path, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    os.fchmod(f.fileno(), 0o600)
                     json.dump(self._persisted_sessions, f, indent=2)
                 os.replace(tmp_path, abs_path)
             except Exception:
@@ -310,7 +308,7 @@ class SessionManager:
                 del self._persisted_sessions[h]
                 persisted_dirty = True
 
-            if len(self._sessions) >= self.max_sessions:
+            while len(self._sessions) >= self.max_sessions and self._sessions:
                 oldest_key = min(self._sessions.keys(), key=lambda k: self._sessions[k]["expires"])
                 del self._sessions[oldest_key]
                 oldest_hash = self._hash_token(oldest_key)
@@ -420,13 +418,25 @@ class WebAuthenticator:
             session_file=resolved_session_file,
         )
 
+    @staticmethod
+    def _sanitize_log_field(value: Any, max_len: int = 128) -> str:
+        """Strips control chars, newlines, and quotes to prevent Fail2ban log injection."""
+        cleaned = "".join(
+            ch for ch in str(value or "")
+            if ch not in ('"', "\r", "\n", "\\") and ord(ch) >= 0x20 and ord(ch) != 0x7F
+        )
+        return cleaned[:max_len]
+
     def log_auth_failure(self, username: str, ip: str, reason: str = "invalid_credentials") -> None:
         """
         Emits standard single-line structured log for Fail2ban parsing.
         Example: 2026-10-20T22:25:00Z [AUTH_FAILURE] user="admin" ip="192.168.1.150" reason="invalid_credentials"
         """
+        safe_user = self._sanitize_log_field(username)
+        safe_ip = self._sanitize_log_field(ip, max_len=64)
+        safe_reason = self._sanitize_log_field(reason, max_len=64)
         iso_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        line = f'{iso_time} [AUTH_FAILURE] user="{username}" ip="{ip}" reason="{reason}"'
+        line = f'{iso_time} [AUTH_FAILURE] user="{safe_user}" ip="{safe_ip}" reason="{safe_reason}"'
         print(line, file=sys.stderr, flush=True)
 
         if self.auth_log_path:

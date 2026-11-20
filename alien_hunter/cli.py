@@ -6,6 +6,7 @@ Parses CLI arguments, elevates permissions if necessary, and drives execution.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -22,9 +23,21 @@ from .ai.engine import AIEngine
 from .models import Device, NetworkInfo, AuditResult, SentinelConfig
 
 
+def _format_url_host(host: str) -> str:
+    """Formats IPv4/IPv6/hostname safely for HTTP URL netloc use."""
+    h = (host or "").strip()
+    if h in ("0.0.0.0", ""):
+        return "127.0.0.1"
+    if h == "::":
+        return "::1"
+    if ":" in h and not h.startswith("["):
+        return f"[{h}]"
+    return h
+
+
 def check_daemon_status(host: str = "127.0.0.1", port: int = 8080) -> Optional[Dict[str, Any]]:
     """Checks if a local Alien Hunter Sentinel daemon is responding on the Web API."""
-    url = f"http://{host}:{port}/api/status"
+    url = f"http://{_format_url_host(host)}:{port}/api/status"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "AlienHunterCLI"})
         with urllib.request.urlopen(req, timeout=1.0) as resp:
@@ -37,9 +50,16 @@ def check_daemon_status(host: str = "127.0.0.1", port: int = 8080) -> Optional[D
     return None
 
 
-def trigger_daemon_scan(host: str = "127.0.0.1", port: int = 8080, deep: bool = False, ai: bool = True, analyze_all: bool = False) -> bool:
+def trigger_daemon_scan(
+    host: str = "127.0.0.1",
+    port: int = 8080,
+    deep: bool = False,
+    ai: bool = True,
+    analyze_all: bool = False,
+    scan_id_out: Optional[Dict[str, Any]] = None,
+) -> bool:
     """Sends scan trigger request to running Sentinel daemon."""
-    url = f"http://{host}:{port}/api/scan?deep={'true' if deep else 'false'}&ai={'true' if ai else 'false'}&analyze_all={'true' if analyze_all else 'false'}"
+    url = f"http://{_format_url_host(host)}:{port}/api/scan?deep={'true' if deep else 'false'}&ai={'true' if ai else 'false'}&analyze_all={'true' if analyze_all else 'false'}"
     try:
         req = urllib.request.Request(
             url,
@@ -50,6 +70,8 @@ def trigger_daemon_scan(host: str = "127.0.0.1", port: int = 8080, deep: bool = 
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
+                if scan_id_out is not None and isinstance(data, dict) and "scan_id" in data:
+                    scan_id_out["scan_id"] = data["scan_id"]
                 return bool(data.get("success", True))
     except Exception as e:
         print(f"{Colors.RED}[-] Failed to signal Sentinel daemon: {e}{Colors.RESET}")
@@ -58,10 +80,48 @@ def trigger_daemon_scan(host: str = "127.0.0.1", port: int = 8080, deep: bool = 
 
 def fetch_from_daemon(endpoint: str, host: str = "127.0.0.1", port: int = 8080) -> Any:
     """Fetches JSON payload from local daemon endpoint."""
-    url = f"http://{host}:{port}{endpoint}"
+    url = f"http://{_format_url_host(host)}:{port}{endpoint}"
     req = urllib.request.Request(url, headers={"User-Agent": "AlienHunterCLI"})
     with urllib.request.urlopen(req, timeout=10.0) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def prompt_whitelist_via_daemon(alien_devices: List[Device], host: str = "127.0.0.1", port: int = 8080) -> None:
+    """Prompts user to whitelist alien devices via the running daemon HTTP API."""
+    mac_re = re.compile(r"^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$")
+    eligible = [a for a in alien_devices if a.mac and mac_re.match(a.mac.strip())]
+    if not eligible:
+        return
+    print(f"{Colors.CYAN}[?] Interactive Whitelisting Mode (via daemon):{Colors.RESET}")
+    url = f"http://{_format_url_host(host)}:{port}/api/whitelist"
+    for a in eligible:
+        try:
+            resp = input(f"Trust {a.ip} - {a.mac} ({a.vendor} / {a.hostname})? [y/N]: ").strip().lower()
+            if resp != "y":
+                continue
+            dev_name = input("Enter friendly name: ").strip() or a.hostname or "Trusted Device"
+        except (EOFError, KeyboardInterrupt):
+            print("\nAborted.")
+            break
+        payload = json.dumps({
+            "mac": a.mac.upper(),
+            "primary_ip": a.ip,
+            "name": dev_name,
+            "owner": "User",
+            "device_type": "Generic",
+        }).encode("utf-8")
+        try:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "AlienHunterCLI"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5.0) as r:
+                if r.status == 200:
+                    print(f"{Colors.GREEN}[+] Whitelisted {a.mac.upper()} ('{dev_name}'){Colors.RESET}")
+        except Exception as e:
+            print(f"{Colors.RED}[-] Failed to whitelist {a.mac}: {e}{Colors.RESET}")
 
 
 def device_from_dict(d: Dict[str, Any]) -> Device:
@@ -122,7 +182,13 @@ def ensure_root():
         print(f"{Colors.YELLOW}[!] Alien Hunter requires root privileges for Layer-2 ARP and raw packet inspection.{Colors.RESET}")
         print(f"{Colors.CYAN}[*] Elevating with sudo...{Colors.RESET}")
         try:
-            os.execvp("sudo", ["sudo", sys.executable] + sys.argv)
+            main_mod = sys.modules.get("__main__")
+            main_spec = getattr(main_mod, "__spec__", None)
+            if (main_spec and getattr(main_spec, "name", None)) or (sys.argv and sys.argv[0].endswith("__main__.py")):
+                cmd = ["sudo", "--", sys.executable, "-m", "alien_hunter", *sys.argv[1:]]
+            else:
+                cmd = ["sudo", "--", sys.executable, *sys.argv]
+            os.execvp("sudo", cmd)
         except Exception as e:
             print(f"{Colors.RED}[-] Failed to elevate with sudo: {e}{Colors.RESET}")
             sys.exit(1)
@@ -144,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--whitelist", action="store_true", help="Interactively add newly detected alien devices to whitelist")
     parser.add_argument("--json", action="store_true", help="Output results in machine-readable JSON format")
     parser.add_argument("-w", "--watch", action="store_true", help="Run in continuous sentinel / daemon mode")
-    parser.add_argument("--interval", type=int, default=300, help="Interval in seconds for watch mode (default: 300)")
+    parser.add_argument("--interval", type=int, default=None, help="Interval in seconds for watch mode (default: 300)")
     parser.add_argument("--web", action="store_true", help="Launch web dashboard and REST API")
     parser.add_argument("--web-port", type=int, default=None, help="Port for the web dashboard (default: 8080)")
     parser.add_argument("--web-host", type=str, default=None, help="Host/IP to bind the web dashboard (default: 0.0.0.0)")
@@ -174,16 +240,29 @@ def main():
 
     configure_logging(debug=args.debug)
 
+    if args.interval is not None and args.interval <= 0:
+        print(f"{Colors.RED}[-] --interval must be >= 1 second.{Colors.RESET}")
+        sys.exit(1)
+
+    can_delegate = not (
+        args.no_delegate
+        or args.watch
+        or args.web
+        or args.ports
+        or args.interface
+        or args.ai_provider
+        or args.no_sync_db
+    )
     need_root = not (args.test_notify or args.test_ai or args.update_signatures or args.set_ai_provider or args.set_web_password or args.disable_web_auth)
-    if need_root and not args.no_delegate and not args.watch:
+    if need_root and can_delegate:
         try:
             cfg_mgr = ConfigManager()
             cfg_path = cfg_mgr.resolve_path("config.json", args.config_file)
             cfg = cfg_mgr.load_config(cfg_path)
-            w_cfg = cfg.get("web_ui", {})
-            w_port = args.web_port if args.web_port is not None else int(w_cfg.get("port", 8080))
-            w_host = args.web_host if args.web_host is not None else str(w_cfg.get("host", "0.0.0.0"))
-            t_host = "127.0.0.1" if w_host in ("0.0.0.0", "") else w_host
+            w_cfg = cfg.get("web_ui") if isinstance(cfg.get("web_ui"), dict) else {}
+            w_port = args.web_port if args.web_port is not None else int(w_cfg.get("port") or 8080)
+            w_host = args.web_host if args.web_host is not None else str(w_cfg.get("host") or "0.0.0.0")
+            t_host = _format_url_host(w_host)
             if check_daemon_status(t_host, w_port):
                 need_root = False
         except Exception:
@@ -216,7 +295,11 @@ def main():
 
         config_mgr = ConfigManager()
         config_path = config_mgr.resolve_path("config.json", args.config_file)
-        config = config_mgr.load_config(config_path)
+        try:
+            config = config_mgr.load_config(config_path, strict=True)
+        except Exception as e:
+            print(f"{Colors.RED}[-] Failed to parse existing {config_path}: {e}. Refusing to overwrite.{Colors.RESET}")
+            sys.exit(1)
         if "web_ui" not in config or not isinstance(config["web_ui"], dict):
             config["web_ui"] = {"enabled": True, "host": "0.0.0.0", "port": 8080}
 
@@ -242,8 +325,11 @@ def main():
             res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
             if res.returncode == 0:
                 print(f"{Colors.CYAN}[*] Restarting alien-hunter.service...{Colors.RESET}")
-                subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
-                print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+                restart_res = subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                if restart_res.returncode == 0:
+                    print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[!] Service restart exited with status {restart_res.returncode}.{Colors.RESET}")
         except Exception:
             pass
         sys.exit(0)
@@ -251,16 +337,28 @@ def main():
     if args.disable_web_auth:
         config_mgr = ConfigManager()
         config_path = config_mgr.resolve_path("config.json", args.config_file)
-        config = config_mgr.load_config(config_path)
-        if "web_ui" in config and isinstance(config["web_ui"], dict) and "auth" in config["web_ui"]:
+        try:
+            config = config_mgr.load_config(config_path, strict=True)
+        except Exception as e:
+            print(f"{Colors.RED}[-] Failed to parse existing {config_path}: {e}. Refusing to overwrite.{Colors.RESET}")
+            sys.exit(1)
+        if (
+            "web_ui" in config
+            and isinstance(config["web_ui"], dict)
+            and isinstance(config["web_ui"].get("auth"), dict)
+        ):
             config["web_ui"]["auth"]["enabled"] = False
-            config_mgr.save_config(config, config_path)
+            if not config_mgr.save_config(config, config_path):
+                print(f"{Colors.RED}[-] Failed to update {config_path}. Check file permissions.{Colors.RESET}")
+                sys.exit(1)
             print(f"{Colors.GREEN}[+] Web authentication disabled in {config_path}{Colors.RESET}")
             import subprocess
             try:
                 res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
                 if res.returncode == 0:
-                    subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                    restart_res = subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                    if restart_res.returncode != 0:
+                        print(f"{Colors.YELLOW}[!] Service restart exited with status {restart_res.returncode}.{Colors.RESET}")
             except Exception:
                 pass
         else:
@@ -276,7 +374,11 @@ def main():
 
         config_mgr = ConfigManager()
         config_path = config_mgr.resolve_path("config.json", args.config_file)
-        config = config_mgr.load_config(config_path)
+        try:
+            config = config_mgr.load_config(config_path, strict=True)
+        except Exception as e:
+            print(f"{Colors.RED}[-] Failed to parse existing {config_path}: {e}. Refusing to overwrite.{Colors.RESET}")
+            sys.exit(1)
         if "ai_analysis" not in config or not isinstance(config["ai_analysis"], dict):
             config["ai_analysis"] = {"enabled": True}
         config["ai_analysis"]["provider"] = target_provider
@@ -291,8 +393,11 @@ def main():
             res = subprocess.run(["systemctl", "is-active", "--quiet", "alien-hunter.service"])
             if res.returncode == 0:
                 print(f"{Colors.CYAN}[*] Restarting alien-hunter.service...{Colors.RESET}")
-                subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
-                print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+                restart_res = subprocess.run(["sudo", "systemctl", "restart", "alien-hunter.service"], check=False)
+                if restart_res.returncode == 0:
+                    print(f"{Colors.GREEN}[+] Service restarted successfully.{Colors.RESET}")
+                else:
+                    print(f"{Colors.YELLOW}[!] Service restart exited with status {restart_res.returncode}.{Colors.RESET}")
         except Exception:
             pass
         sys.exit(0)
@@ -451,12 +556,15 @@ def main():
     if getattr(args, "ports", ""):
         from .scanners.ports import parse_port_specs
         custom_ports = parse_port_specs(args.ports)
+        if not custom_ports:
+            print(f"{Colors.RED}[-] Invalid port specification: {args.ports!r}{Colors.RESET}")
+            sys.exit(1)
 
-    web_cfg = config.get("web_ui", {})
+    web_cfg = config.get("web_ui") if isinstance(config.get("web_ui"), dict) else {}
     web_enabled = bool(args.web or web_cfg.get("enabled", False))
-    web_port = args.web_port if args.web_port is not None else int(web_cfg.get("port", 8080))
-    web_host = args.web_host if args.web_host is not None else str(web_cfg.get("host", "0.0.0.0"))
-    target_host = "127.0.0.1" if web_host in ("0.0.0.0", "") else web_host
+    web_port = args.web_port if args.web_port is not None else int(web_cfg.get("port") or 8080)
+    web_host = args.web_host if args.web_host is not None else str(web_cfg.get("host") or "0.0.0.0")
+    target_host = _format_url_host(web_host)
 
     daemon_status = None if args.no_delegate else check_daemon_status(target_host, web_port)
 
@@ -472,6 +580,7 @@ def main():
             interval=args.interval,
             deep_scan=args.deep,
             interface=selected_interface,
+            config_path=config_path,
             whitelist_path=whitelist_path,
             events_path=events_path,
             custom_ports=custom_ports,
@@ -491,23 +600,28 @@ def main():
         return
 
     # Check if Sentinel daemon is running to delegate on-demand audit safely
-    if daemon_status:
+    if daemon_status and can_delegate:
         if not args.json:
             ConsoleReporter.render_banner(__version__)
             print(f"{Colors.CYAN}[*] Active Sentinel daemon detected on http://{target_host}:{web_port}{Colors.RESET}")
             analyze_all_str = ", analyze_all=True" if args.analyze_all else ""
             print(f"{Colors.CYAN}[*] Delegating network audit to active daemon (deep={args.deep}, ai={ai_enabled}{analyze_all_str})...{Colors.RESET}")
 
-        if not trigger_daemon_scan(target_host, web_port, deep=args.deep, ai=ai_enabled, analyze_all=args.analyze_all):
+        scan_meta: Dict[str, Any] = {}
+        if not trigger_daemon_scan(target_host, web_port, deep=args.deep, ai=ai_enabled, analyze_all=args.analyze_all, scan_id_out=scan_meta):
             print(f"{Colors.RED}[-] Failed to trigger scan on daemon. Exiting.{Colors.RESET}")
             sys.exit(1)
 
+        target_scan_id = scan_meta.get("scan_id")
         time.sleep(0.5)
         start_wait = time.time()
         while True:
             try:
                 st = fetch_from_daemon("/api/status", target_host, web_port)
-                if not st.get("is_scanning", False):
+                if target_scan_id:
+                    if st.get("completed_scan_id", 0) >= target_scan_id and not st.get("is_scanning", False):
+                        break
+                elif not st.get("is_scanning", False):
                     break
             except Exception:
                 pass
@@ -527,8 +641,12 @@ def main():
             sys.stdout.write("\r" + " " * 65 + "\r")
             sys.stdout.flush()
 
-        devices_payload = fetch_from_daemon("/api/devices", target_host, web_port)
-        status_payload = fetch_from_daemon("/api/status", target_host, web_port)
+        try:
+            devices_payload = fetch_from_daemon("/api/devices", target_host, web_port)
+            status_payload = fetch_from_daemon("/api/status", target_host, web_port)
+        except Exception as e:
+            print(f"{Colors.RED}[-] Failed fetching audit results from daemon: {e}{Colors.RESET}")
+            sys.exit(1)
 
         trusted_raw = devices_payload.get("trusted", [])
         alien_raw = devices_payload.get("alien", [])
@@ -604,7 +722,7 @@ def main():
         ConsoleReporter.render_table(result.devices)
         ConsoleReporter.render_summary(result)
 
-        should_notify = bool(result.alien_devices) or bool(result.threats) or args.notify
+        should_notify = bool(args.notify)
         if should_notify and notifier.active_hook_count > 0:
             print(f"\n{Colors.CYAN}[*] Dispatching notification to {notifier.active_hook_count} active hook(s)...{Colors.RESET}")
             dispatched = notifier.dispatch(
@@ -619,9 +737,7 @@ def main():
                 print(f"{Colors.RED}[✘] Failed to dispatch notifications via active hooks.{Colors.RESET}")
 
         if args.whitelist and result.alien_devices:
-            ConsoleReporter.prompt_whitelist(
-                result.alien_devices, config_mgr, whitelist_path, whitelist
-            )
+            prompt_whitelist_via_daemon(result.alien_devices, target_host, web_port)
         return
 
     # Standard Audit Mode

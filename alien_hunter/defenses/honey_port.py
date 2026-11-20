@@ -5,6 +5,7 @@ lateral movement, and worm propagation by compromised network hosts.
 """
 
 import collections
+import ipaddress
 import select
 import socket
 import threading
@@ -94,6 +95,7 @@ class HoneyPortListener:
         bound_ports: List[int] = []
         with self._lock:
             for port in self.requested_ports:
+                s = None
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -103,6 +105,11 @@ class HoneyPortListener:
                     self.active_sockets[port] = s
                     bound_ports.append(port)
                 except Exception as e:
+                    if s is not None:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
                     # Port already in use by host or permission denied (<1024 without root)
                     log.debug("Honey-port bind failed on port %s: %s", port, e)
                     continue
@@ -134,7 +141,7 @@ class HoneyPortListener:
         """Internal select-based loop monitoring decoy sockets."""
         while self._running:
             with self._lock:
-                sockets_list = list(self.active_sockets.values())
+                sockets_list = [s for s in self.active_sockets.values() if s.fileno() >= 0]
 
             if not sockets_list:
                 break
@@ -144,28 +151,25 @@ class HoneyPortListener:
                 for s in readable:
                     try:
                         conn, addr = s.accept()
-                        src_ip, src_port = addr[0], addr[1]
-                        dest_port = s.getsockname()[1]
+                        with conn:
+                            src_ip, src_port = addr[0], addr[1]
+                            dest_port = s.getsockname()[1]
 
-                        with self._lock:
-                            is_ignored_ip = src_ip in self.ignored_ips
+                            with self._lock:
+                                is_ignored_ip = src_ip in self.ignored_ips
 
-                        if is_ignored_ip:
-                            try:
-                                conn.close()
-                            except Exception:
-                                pass
-                            continue
+                            if is_ignored_ip:
+                                continue
 
-                        meta = HoneyAuthTrap.inspect_connection(conn, dest_port)
-                        try:
-                            conn.close()
-                        except Exception:
-                            pass
+                            meta = HoneyAuthTrap.inspect_connection(conn, dest_port)
 
                         tooling = meta.get("tooling", "")
                         payload = meta.get("payload_snippet", "")
-                        if "AlienHunter/" in tooling or "AlienHunter/" in payload:
+                        try:
+                            is_loopback = ipaddress.ip_address(src_ip).is_loopback
+                        except ValueError:
+                            is_loopback = False
+                        if is_loopback and ("AlienHunter/" in tooling or "AlienHunter/" in payload):
                             continue
 
                         event = HoneyPortEvent(
@@ -190,8 +194,16 @@ class HoneyPortListener:
                     except Exception as e:
                         log.debug("Honey-port accept loop error: %s", e)
                         continue
+            except (OSError, ValueError) as e:
+                log.debug("Honey-port select error: %s", e)
+                with self._lock:
+                    for port in [p for p, sock in self.active_sockets.items() if sock.fileno() < 0]:
+                        self.active_sockets.pop(port, None)
+                time.sleep(0.05)
+                continue
             except Exception as e:
                 log.debug("Honey-port select error: %s", e)
+                time.sleep(0.05)
                 continue
 
     def drain_events(self) -> List[HoneyPortEvent]:

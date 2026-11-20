@@ -91,7 +91,7 @@ class TestAIEngine(unittest.TestCase):
         self.assertEqual(assessment.whitelist_recommendation, "INVESTIGATE")
 
     def test_infer_device_hint(self):
-        # Nothing Phone
+        # Mobile Phone
         phone = Device(
             ip="192.0.2.40",
             mac="02:00:00:00:00:40",
@@ -112,7 +112,7 @@ class TestAIEngine(unittest.TestCase):
         # Stealth Randomized MAC Mobile Device (e.g. iPhone Private Wi-Fi Address)
         iphone = Device(
             ip="192.0.2.42",
-            mac="02:00:00:00:00:28",
+            mac="02:00:00:00:00:42",
             vendor="Randomized Private MAC",
             is_randomized=True,
         )
@@ -140,7 +140,7 @@ class TestAIEngine(unittest.TestCase):
 
         # IP Surveillance Camera with RTSP Port
         cam = Device(
-            ip="192.168.1.150",
+            ip="192.0.2.45",
             mac="02:00:00:00:00:45",
             open_ports=["554/tcp rtsp"],
         )
@@ -149,7 +149,7 @@ class TestAIEngine(unittest.TestCase):
     def test_parse_response_with_analysis(self):
         iphone = Device(
             ip="192.0.2.42",
-            mac="02:00:00:00:00:28",
+            mac="02:00:00:00:00:42",
             is_randomized=True,
         )
         raw_json = (
@@ -205,7 +205,7 @@ class TestAIEngine(unittest.TestCase):
 
         dev = Device(
             ip="192.0.2.42",
-            mac="02:00:00:00:00:28",
+            mac="02:00:00:00:00:42",
             is_randomized=True,
         )
         user_prompt = self.provider.build_user_prompt(dev)
@@ -286,16 +286,16 @@ class TestAIEngine(unittest.TestCase):
 
         net_info = NetworkInfo(
             interface="wlan0",
-            local_ip="192.168.1.10",
+            local_ip="192.0.2.10",
             local_mac="02:00:00:00:00:10",
-            gateway_ip="192.168.1.1",
+            gateway_ip="192.0.2.1",
             gateway_mac="00:1A:2B:3C:4D:5E",
-            subnet_base="192.168.1",
+            subnet_base="192.0.2",
         )
-        router = Device(ip="192.168.1.1", mac="00:1A:2B:3C:4D:5E", hostname="router-gw", vendor="Generic Router Corp", open_ports=["80/HTTP", "443/HTTPS", "53/DNS"])
+        router = Device(ip="192.0.2.1", mac="00:1A:2B:3C:4D:5E", hostname="router-gw", vendor="Generic Router Corp", open_ports=["80/HTTP", "443/HTTPS", "53/DNS"])
         tv = Device(ip="192.0.2.26", mac="02:00:00:00:00:26", hostname="SmartTV-LivingRoom", vendor="Generic TV Corp", open_ports=["8008/HTTP"])
-        pc = Device(ip="192.0.2.50", mac="02:00:00:00:00:41", hostname="Workstation-01", vendor="Generic PC Vendor", open_ports=["445/SMB"])
-        alien = Device(ip="192.168.1.200", mac="02:00:00:00:00:99", hostname="UnknownHost", vendor="Tuya", is_alien=True)
+        pc = Device(ip="192.0.2.50", mac="02:00:00:00:00:50", hostname="Workstation-01", vendor="Generic PC Corp", open_ports=["445/SMB"])
+        alien = Device(ip="192.0.2.200", mac="02:00:00:00:00:99", hostname="UnknownHost", vendor="Tuya", is_alien=True)
 
         audit = AuditResult(
             timestamp=0,
@@ -437,6 +437,69 @@ class TestAIEngine(unittest.TestCase):
         finally:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
+
+    def test_from_config_isolates_profile_credentials_and_cache_key_context(self):
+        cfg = {
+            "ai_analysis": {
+                "enabled": True,
+                "provider": "openrouter",
+                "endpoint": "http://localhost:11434",
+                "api_key": "stale-top-level-key",
+                "model": "stale-top-level-model",
+                "providers": {
+                    "openrouter": {
+                        "api_key": "profile-openrouter-key",
+                    }
+                },
+            }
+        }
+        engine = AIEngine.from_config(cfg)
+        self.assertIsNotNone(engine)
+        self.assertEqual(engine.provider.endpoint, "https://openrouter.ai/api/v1/chat/completions")
+        self.assertEqual(engine.provider.api_key, "profile-openrouter-key")
+        self.assertEqual(engine.provider.model, "google/gemini-2.0-flash-001")
+
+        # Cache key distinguishes threat/notes context while keeping bare key intact
+        bare = Device(ip="198.51.100.10", mac="02:00:00:00:00:10", open_ports=["80/HTTP"])
+        with_threat = Device(
+            ip="198.51.100.10", mac="02:00:00:00:00:10", open_ports=["80/HTTP"], threats=["Rogue DNS"]
+        )
+        self.assertEqual(engine._cache_key(bare), "02:00:00:00:00:10::80/HTTP")
+        self.assertNotEqual(engine._cache_key(bare), engine._cache_key(with_threat))
+
+    def test_openai_compatible_and_gemini_auth_and_retry_hardening(self):
+        import urllib.error
+        from alien_hunter.ai.providers.openai_compatible import OpenAICompatibleProvider
+        from alien_hunter.ai.providers.gemini import GeminiProvider
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-openai-only"}, clear=False):
+            or_prov = OpenAICompatibleProvider({"provider": "openrouter"})
+            self.assertEqual(or_prov.api_key, "")
+
+        # Do not retry without response_format on HTTP 401
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                "https://openrouter.ai/api/v1/chat/completions", 401, "Unauthorized", {}, None
+            )
+            p = OpenAICompatibleProvider({"provider": "openrouter", "api_key": "bad-key"})
+            res = p._generate_content("sys", "usr")
+            self.assertIsNone(res)
+            self.assertEqual(mock_urlopen.call_count, 1)
+
+        # Gemini sends x-goog-api-key header rather than ?key= query string
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_resp = MagicMock()
+            mock_resp.status = 200
+            mock_resp.read.return_value = b'{"candidates": [{"content": {"parts": [{"text": "{}"}]}}]}'
+            mock_resp.__enter__.return_value = mock_resp
+            mock_urlopen.return_value = mock_resp
+
+            gem = GeminiProvider({"api_key": "gem-secret-key", "model": "gemini-2.0-flash"})
+            out = gem._generate_content("sys", "usr")
+            self.assertEqual(out, "{}")
+            req = mock_urlopen.call_args[0][0]
+            self.assertNotIn("key=", req.full_url)
+            self.assertEqual(req.get_header("X-goog-api-key"), "gem-secret-key")
 
 
 if __name__ == "__main__":

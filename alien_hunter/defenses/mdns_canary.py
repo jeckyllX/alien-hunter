@@ -5,10 +5,11 @@ by broadcasting mDNS queries for fictitious canary hostnames on UDP 5353.
 """
 
 import os
+import select
 import socket
 import struct
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Set, Tuple
 
 from ..scanners.net_utils import create_udp_socket
 
@@ -108,65 +109,112 @@ class MdnsCanaryTrap:
         query_pkt = cls.build_mdns_query(canary_hostname, trans_id=trans_id)
 
         sock = None
+        mcast_sock = None
         try:
             sock = create_udp_socket(interface=interface, broadcast=True, timeout=0.3)
             # RFC 6762 requirement: IP_MULTICAST_TTL MUST be 255
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+
+            # Best-effort listener on UDP 5353 multicast group for multicast-only responders
+            try:
+                mcast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+                mcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                if hasattr(socket, "SO_REUSEPORT"):
+                    try:
+                        mcast_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                    except OSError:
+                        pass
+                mcast_sock.bind(("", cls.MDNS_PORT))
+                mreq = struct.pack(
+                    "4s4s",
+                    socket.inet_aton(cls.MDNS_GROUP),
+                    socket.inet_aton("0.0.0.0"),
+                )
+                mcast_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                mcast_sock.settimeout(0.3)
+            except Exception:
+                if mcast_sock is not None:
+                    try:
+                        mcast_sock.close()
+                    except Exception:
+                        pass
+                    mcast_sock = None
 
             # Send canary query to multicast group
             sock.sendto(query_pkt, (cls.MDNS_GROUP, cls.MDNS_PORT))
 
             start_time = time.time()
             detected_attackers: List[Tuple[str, str]] = []  # (attacker_ip, spoofed_ip)
+            seen_attackers: Set[Tuple[str, str]] = set()
 
-            while time.time() - start_time < timeout:
+            poll_socks = [s for s in (sock, mcast_sock) if s is not None]
+            try:
+                can_select = all(isinstance(s.fileno(), int) and s.fileno() >= 0 for s in poll_socks)
+            except Exception:
+                can_select = False
+
+            while True:
+                remaining = timeout - (time.time() - start_time)
+                if remaining <= 0:
+                    break
                 try:
-                    data, addr = sock.recvfrom(4096)
-                    attacker_ip = addr[0]
+                    if can_select:
+                        readable, _, _ = select.select(poll_socks, [], [], min(0.3, remaining))
+                        if not readable:
+                            continue
+                    else:
+                        readable = [sock]
 
-                    if len(data) < 12:
-                        continue
+                    for active_sock in readable:
+                        data, addr = active_sock.recvfrom(4096)
+                        attacker_ip = addr[0]
 
-                    _, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", data[:12])
-                    # Must be a DNS response (QR bit set) with at least 1 answer
-                    if not (flags & 0x8000) or ancount == 0:
-                        continue
+                        if len(data) < 12:
+                            continue
 
-                    offset = 12
-                    # Skip Question section
-                    for _ in range(qdcount):
-                        if offset >= len(data):
-                            break
-                        _, offset = cls._parse_dns_name(data, offset)
-                        offset += 4  # QTYPE (2) + QCLASS (2)
+                        _, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", data[:12])
+                        # Must be a DNS response (QR bit set) with at least 1 answer
+                        if not (flags & 0x8000) or ancount == 0:
+                            continue
 
-                    # Inspect Answer records
-                    matched_canary = False
-                    spoofed_ip = ""
+                        offset = 12
+                        # Skip Question section
+                        for _ in range(qdcount):
+                            if offset >= len(data):
+                                break
+                            _, offset = cls._parse_dns_name(data, offset)
+                            offset += 4  # QTYPE (2) + QCLASS (2)
 
-                    for _ in range(ancount):
-                        if offset >= len(data):
-                            break
-                        record_name, offset = cls._parse_dns_name(data, offset)
-                        if offset + 10 > len(data):
-                            break
-                        rtype, _, _, rdlen = struct.unpack("!HHIH", data[offset : offset + 10])
-                        offset += 10
-                        rdata = data[offset : offset + rdlen]
-                        offset += rdlen
+                        # Inspect Answer records
+                        matched_canary = False
+                        spoofed_ip = ""
 
-                        # Check if answered domain matches our unique canary token
-                        if canary_token.lower() in record_name.lower():
+                        for _ in range(ancount):
+                            if offset >= len(data):
+                                break
+                            record_name, offset = cls._parse_dns_name(data, offset)
+                            if offset + 10 > len(data):
+                                break
+                            rtype, _, _, rdlen = struct.unpack("!HHIH", data[offset : offset + 10])
+                            offset += 10
+                            rdata = data[offset : offset + rdlen]
+                            offset += rdlen
+
+                            # Check if answered domain matches our unique canary token
+                            if canary_token.lower() in record_name.lower():
+                                matched_canary = True
+                                if rtype == 1 and len(rdata) == 4:  # Type A (IPv4)
+                                    spoofed_ip = socket.inet_ntoa(rdata)
+
+                        # Fallback check: look for canary token string in payload if parser encountered unusual compression
+                        if not matched_canary and canary_token.encode("utf-8") in data[12:]:
                             matched_canary = True
-                            if rtype == 1 and len(rdata) == 4:  # Type A (IPv4)
-                                spoofed_ip = socket.inet_ntoa(rdata)
 
-                    # Fallback check: look for canary token string in payload if parser encountered unusual compression
-                    if not matched_canary and canary_token.encode("utf-8") in data[12:]:
-                        matched_canary = True
-
-                    if matched_canary:
-                        detected_attackers.append((attacker_ip, spoofed_ip))
+                        if matched_canary:
+                            entry = (attacker_ip, spoofed_ip)
+                            if entry not in seen_attackers:
+                                seen_attackers.add(entry)
+                                detected_attackers.append(entry)
 
                 except (socket.timeout, BlockingIOError):
                     continue
@@ -184,6 +232,11 @@ class MdnsCanaryTrap:
         except Exception:
             pass
         finally:
+            if mcast_sock:
+                try:
+                    mcast_sock.close()
+                except Exception:
+                    pass
             if sock:
                 try:
                     sock.close()

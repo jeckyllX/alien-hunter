@@ -7,6 +7,7 @@ of local network telemetry or identifying device data.
 
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -14,6 +15,7 @@ import urllib.request
 from typing import Dict, Any, Optional, Tuple
 
 from ..config import ConfigManager
+from ..http_utils import safe_urlopen, read_bounded
 
 
 class SignatureSyncEngine:
@@ -77,6 +79,37 @@ class SignatureSyncEngine:
         if len(data["dhcp_signatures"]) < 5:
             return False, "Signature payload rejected: contains fewer than 5 DHCP signatures"
 
+        for idx, item in enumerate(data["dhcp_signatures"]):
+            if not isinstance(item, dict):
+                return False, f"'dhcp_signatures[{idx}]' must be an object"
+            vc_pat = item.get("vendor_class_pattern")
+            if vc_pat is not None:
+                if not isinstance(vc_pat, str):
+                    return False, f"'dhcp_signatures[{idx}].vendor_class_pattern' must be a string"
+                try:
+                    re.compile(vc_pat, re.IGNORECASE)
+                except re.error as e:
+                    return False, f"Invalid regex in 'dhcp_signatures[{idx}].vendor_class_pattern': {e}"
+
+        if "ssdp_signatures" in data:
+            if not isinstance(data["ssdp_signatures"], list):
+                return False, "'ssdp_signatures' must be a list"
+            for idx, item in enumerate(data["ssdp_signatures"]):
+                if not isinstance(item, dict):
+                    return False, f"'ssdp_signatures[{idx}]' must be an object"
+                for key in ("server_pattern", "target_pattern"):
+                    pat = item.get(key)
+                    if pat is not None:
+                        if not isinstance(pat, str):
+                            return False, f"'ssdp_signatures[{idx}].{key}' must be a string"
+                        try:
+                            re.compile(pat, re.IGNORECASE)
+                        except re.error as e:
+                            return False, f"Invalid regex in 'ssdp_signatures[{idx}].{key}': {e}"
+
+        if "tcp_syn_signatures" in data and not isinstance(data["tcp_syn_signatures"], list):
+            return False, "'tcp_syn_signatures' must be a list"
+
         return True, "Valid"
 
     def sync(self, force: bool = False) -> Tuple[bool, str]:
@@ -88,8 +121,10 @@ class SignatureSyncEngine:
         now = time.time()
         meta = self.load_metadata()
         last_check = float(meta.get("last_checked", 0.0))
+        target_file = self.get_target_path()
+        target_exists = os.path.exists(target_file)
 
-        if not force and (now - last_check < self.MIN_SYNC_INTERVAL_SECONDS):
+        if not force and target_exists and (now - last_check < self.MIN_SYNC_INTERVAL_SECONDS):
             hours_ago = (now - last_check) / 3600.0
             return (
                 True,
@@ -100,10 +135,11 @@ class SignatureSyncEngine:
             "User-Agent": self.USER_AGENT,
             "Accept": "application/json",
         }
-        if meta.get("etag"):
-            headers["If-None-Match"] = meta["etag"]
-        if meta.get("last_modified"):
-            headers["If-Modified-Since"] = meta["last_modified"]
+        if force or target_exists:
+            if meta.get("etag"):
+                headers["If-None-Match"] = meta["etag"]
+            if meta.get("last_modified"):
+                headers["If-Modified-Since"] = meta["last_modified"]
 
         url = self.feed_url
         if force:
@@ -113,11 +149,12 @@ class SignatureSyncEngine:
         req = urllib.request.Request(url, headers=headers)
 
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                status_code = resp.status
+            with safe_urlopen(
+                req, timeout=self.timeout, allowed_schemes=("https",), allow_redirects=True
+            ) as resp:
                 etag = resp.headers.get("ETag")
                 last_mod = resp.headers.get("Last-Modified")
-                raw_bytes = resp.read()
+                raw_bytes = read_bounded(resp, 2 * 1024 * 1024)
 
                 try:
                     payload = json.loads(raw_bytes.decode("utf-8"))
@@ -128,15 +165,15 @@ class SignatureSyncEngine:
                 if not is_valid:
                     return False, f"Signature payload validation failed: {reason}"
 
-                target_file = self.get_target_path()
                 target_dir = os.path.dirname(os.path.abspath(target_file))
                 os.makedirs(target_dir, exist_ok=True)
 
-                # Atomic write: write to temp file in target directory, then atomic rename
+                # Atomic write: write to temp file in target directory, set readable mode, then atomic rename
                 tmp_fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=".sig_tmp_")
                 try:
                     with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                         json.dump(payload, f, indent=2)
+                    os.chmod(tmp_path, 0o644)
                     os.replace(tmp_path, target_file)
                 except Exception as e:
                     if os.path.exists(tmp_path):

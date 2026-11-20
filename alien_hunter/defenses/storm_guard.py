@@ -97,6 +97,9 @@ class StormGuard:
 
         # Sliding window of (timestamp, src_mac, is_broadcast_or_multicast)
         self._frame_history: deque = deque()
+        self._max_frame_history = 50000
+        self._bcast_count = 0
+        self._mac_counts: Dict[str, int] = {}
         self._total_frames_processed = 0
 
         # Output threat queues
@@ -162,12 +165,14 @@ class StormGuard:
 
         with self._lock:
             self._total_frames_processed += 1
-            self._frame_history.append((ts, src_mac, is_bcast_mcast))
+            if len(self._frame_history) >= self._max_frame_history:
+                self._pop_oldest_locked()
+            self._append_frame_locked(ts, src_mac, is_bcast_mcast)
 
-            # Evict entries outside the sliding window
+            # Evict entries outside the sliding window in O(1) amortized
             cutoff = ts - self.window_seconds
             while self._frame_history and self._frame_history[0][0] < cutoff:
-                self._frame_history.popleft()
+                self._pop_oldest_locked()
 
             if len(self._frame_history) < 5:
                 return None
@@ -176,8 +181,7 @@ class StormGuard:
             duration = max(0.1, ts - oldest_ts)
 
             # 1. Evaluate CAM Table Flooding (rapid MAC churn)
-            distinct_macs = {item[1] for item in self._frame_history}
-            distinct_count = len(distinct_macs)
+            distinct_count = len(self._mac_counts)
 
             if distinct_count >= self.cam_flood_threshold:
                 last_alert = self._last_alert_times.get("CAM_TABLE_FLOOD", 0.0)
@@ -190,7 +194,7 @@ class StormGuard:
                         threshold=self.cam_flood_threshold,
                         timestamp=ts,
                         distinct_mac_count=distinct_count,
-                        sample_macs=sorted(list(distinct_macs))[:8],
+                        sample_macs=sorted(list(self._mac_counts.keys()))[:8],
                         duration=duration,
                     )
                     self._threat_queue.append(event.to_threat_string())
@@ -199,7 +203,7 @@ class StormGuard:
 
             # 2. Evaluate Broadcast / Multicast Storm
             # Require minimum observation duration to prevent brief sub-second micro-bursts from extrapolating into storms.
-            bcast_count = sum(1 for item in self._frame_history if item[2])
+            bcast_count = self._bcast_count
             min_duration = min(0.75, self.window_seconds * 0.5)
             if duration >= min_duration and bcast_count >= min(50, self.broadcast_storm_threshold):
                 bcast_pps = bcast_count / duration
@@ -222,6 +226,22 @@ class StormGuard:
 
             return None
 
+    def _append_frame_locked(self, ts: float, src_mac: str, is_bcast_mcast: bool) -> None:
+        self._frame_history.append((ts, src_mac, is_bcast_mcast))
+        self._mac_counts[src_mac] = self._mac_counts.get(src_mac, 0) + 1
+        if is_bcast_mcast:
+            self._bcast_count += 1
+
+    def _pop_oldest_locked(self) -> None:
+        _, old_mac, old_bcast = self._frame_history.popleft()
+        if old_bcast and self._bcast_count > 0:
+            self._bcast_count -= 1
+        cnt = self._mac_counts.get(old_mac, 0)
+        if cnt <= 1:
+            self._mac_counts.pop(old_mac, None)
+        else:
+            self._mac_counts[old_mac] = cnt - 1
+
     def get_threat_strings(self) -> List[str]:
         """Drains and returns all newly detected storm/flooding threat strings."""
         threats: List[str] = []
@@ -236,12 +256,12 @@ class StormGuard:
             ts = now if now is not None else time.time()
             cutoff = ts - self.window_seconds
             while self._frame_history and self._frame_history[0][0] < cutoff:
-                self._frame_history.popleft()
+                self._pop_oldest_locked()
 
             window_len = len(self._frame_history)
             duration = max(0.1, min(self.window_seconds, (ts - self._frame_history[0][0]) if self._frame_history else 0.1))
-            bcast_count = sum(1 for item in self._frame_history if item[2])
-            distinct_macs = len({item[1] for item in self._frame_history})
+            bcast_count = self._bcast_count
+            distinct_macs = len(self._mac_counts)
 
             return {
                 "running": self.running,
@@ -337,13 +357,8 @@ class StormGuard:
     def stop(self):
         """Stops the sniffing thread and releases socket resources."""
         self.running = False
-        if self._socket:
-            try:
-                self._socket.close()
-            except Exception:
-                pass
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
 
     def _sniff_loop(self):
         """Background worker thread capturing Layer-2 Ethernet frames."""
@@ -351,7 +366,8 @@ class StormGuard:
         mreq = None
         try:
             raw_sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(self.ETH_P_ALL))
-            self._socket = raw_sock
+            with self._lock:
+                self._socket = raw_sock
 
             if self.interface:
                 try:
@@ -368,7 +384,7 @@ class StormGuard:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(0.5)
+            raw_sock.settimeout(0.25)
             while self.running:
                 try:
                     pkt, sll = raw_sock.recvfrom(2048)
@@ -383,12 +399,18 @@ class StormGuard:
                     self.process_frame(pkt)
                 except socket.timeout:
                     continue
+                except OSError:
+                    break
                 except Exception:
                     if not self.running:
                         break
+                    time.sleep(0.05)
         except Exception:
             pass
         finally:
+            self.running = False
+            with self._lock:
+                self._socket = None
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,
@@ -400,4 +422,3 @@ class StormGuard:
                     raw_sock.close()
                 except Exception:
                     pass
-            self.running = False

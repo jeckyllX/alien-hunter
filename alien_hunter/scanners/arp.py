@@ -179,16 +179,15 @@ class ArpScanner:
             return None
         try:
             import fcntl
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            ip = socket.inet_ntoa(
-                fcntl.ioctl(
-                    s.fileno(),
-                    0x8915,  # SIOCGIFADDR
-                    struct.pack("256s", interface[:15].encode("utf-8")),
-                )[20:24]
-            )
-            s.close()
-            return ip
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                ip = socket.inet_ntoa(
+                    fcntl.ioctl(
+                        s.fileno(),
+                        0x8915,  # SIOCGIFADDR
+                        struct.pack("256s", interface[:15].encode("utf-8")),
+                    )[20:24]
+                )
+                return ip
         except Exception:
             return None
 
@@ -248,7 +247,7 @@ class ArpScanner:
 
         # 3. Kernel neighbor table enrichment (only for REACHABLE / PERMANENT entries)
         try:
-            cmd_neigh = ["ip", "-json", "neigh", "show"]
+            cmd_neigh = ["ip", "-4", "-json", "neigh", "show"]
             if self.interface:
                 cmd_neigh.extend(["dev", self.interface])
 

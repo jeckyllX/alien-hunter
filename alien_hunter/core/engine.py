@@ -83,9 +83,11 @@ class DiscoveryEngine:
             if r.get("dst") == "default":
                 if not dev:
                     dev = r.get("dev")
-                if dev and r.get("dev") == dev:
                     gateway_ip = r.get("gateway")
-                break
+                    break
+                elif r.get("dev") == dev:
+                    gateway_ip = r.get("gateway")
+                    break
 
         # 2. If interface was specified or found, check routes again for its specific gateway
         if dev and not gateway_ip:
@@ -131,6 +133,8 @@ class DiscoveryEngine:
         if gateway_ip:
             neighs = cls._run_ip_json("neigh", "show", gateway_ip)
             for n in neighs:
+                if dev and n.get("dev") and n.get("dev") != dev:
+                    continue
                 if n.get("lladdr"):
                     gateway_mac = n.get("lladdr").upper()
                     break
@@ -512,11 +516,12 @@ class DiscoveryEngine:
         if mac:
             mac = mac.upper()
             if mac in whitelist:
-                is_trusted = True
-                friendly_name = whitelist[mac].get("name")
+                is_trusted = bool(whitelist[mac].get("trusted", True))
+                if is_trusted:
+                    friendly_name = whitelist[mac].get("name")
             vendor, is_rand = self.vendor_resolver.resolve(mac)
         else:
-            mac = "N/A (Asleep)"
+            mac = ""
 
         # DHCP Option 55/60 Passive Fingerprint Unmasking
         dhcp_fp_info = DhcpFingerprintStore.get_instance().get(mac)
@@ -604,10 +609,10 @@ class DiscoveryEngine:
         if ssdp_match:
             ssdp_fingerprint = ssdp_match.vendor
             notes.append(f"SSDP Device: {ssdp_match.vendor} ({ssdp_match.source})")
-            if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC"):
-                vendor = ssdp_match.vendor
-            elif is_rand and vendor == "Randomized Private MAC":
+            if is_rand and vendor == "Randomized Private MAC":
                 vendor = f"{ssdp_match.vendor} (Randomized MAC)"
+            elif vendor in ("N/A", "Unknown Vendor"):
+                vendor = ssdp_match.vendor
 
         # Passive TCP SYN Stack Fingerprint Resolution
         tcp_syn_info = TcpSynFingerprintStore.get_instance().get(ip)
@@ -626,21 +631,10 @@ class DiscoveryEngine:
                 notes.append(
                     f"TCP Stack OS: {tcp_match.vendor} (TTL={tcp_syn_info['ttl']}, Options={tcp_syn_info['options']})"
                 )
-                if vendor in ("N/A", "Unknown Vendor", "Randomized Private MAC") and not dhcp_fingerprint:
-                    vendor = f"{tcp_match.vendor} (TCP SYN)"
-                elif is_rand and vendor == "Randomized Private MAC" and not dhcp_fingerprint:
+                if is_rand and vendor == "Randomized Private MAC" and not dhcp_fingerprint:
                     vendor = f"{tcp_match.vendor} (Randomized MAC)"
-
-        # Fallback alias matching for sleeping devices without ARP response
-        if not is_trusted and mac == "N/A (Asleep)":
-            for w_mac, w_info in whitelist.items():
-                w_name = w_info.get("name", "").lower()
-                if (w_name in clean_host.lower()) or (
-                    resolved_name and w_name in resolved_name.lower()
-                ):
-                    is_trusted = True
-                    friendly_name = f"{w_info.get('name')} (DHCP Lease)"
-                    break
+                elif vendor in ("N/A", "Unknown Vendor") and not dhcp_fingerprint:
+                    vendor = f"{tcp_match.vendor} (TCP SYN)"
 
         status = self._compute_device_status(
             ip=ip,
@@ -661,6 +655,23 @@ class DiscoveryEngine:
                 mac = "N/A (Asleep)"
             else:
                 mac = "N/A (Virtual / Alias)"
+
+        # Fallback exact-name matching strictly for inactive/sleeping DHCP leases without ARP MAC
+        if not is_trusted and status == "Sleeping / Inactive Lease" and mac == "N/A (Asleep)":
+            clean_lower = clean_host.strip().lower()
+            resolved_lower = resolved_name.strip().lower() if resolved_name else ""
+            for w_mac, w_info in whitelist.items():
+                if not isinstance(w_info, dict) or not w_info.get("trusted", True):
+                    continue
+                w_name = str(w_info.get("name", "")).strip().lower()
+                if not w_name:
+                    continue
+                if (clean_lower and clean_lower != "unknown" and w_name == clean_lower) or (
+                    resolved_lower and w_name == resolved_lower
+                ):
+                    is_trusted = True
+                    friendly_name = f"{w_info.get('name')} (DHCP Lease)"
+                    break
 
         # Add scanner metadata notes
         if nb_data and nb_data.get("workgroup"):
@@ -891,10 +902,33 @@ class DiscoveryEngine:
         bg_defenses = active_background_defenses or {}
         active_honey_ports = set(bg_defenses.get("honey_ports") or [])
 
+        # Resolve authoritative gateway MAC (whitelist entry takes precedence over mutable ARP cache)
+        authoritative_gw_mac = net_info.gateway_mac
+        if net_info.gateway_ip:
+            for w_mac, w_info in whitelist.items():
+                if not isinstance(w_info, dict) or not w_info.get("trusted", True):
+                    continue
+                if w_info.get("primary_ip") == net_info.gateway_ip and self._is_valid_hardware_mac(w_mac):
+                    authoritative_gw_mac = w_mac.upper()
+                    break
+
         # Threat Detection & Active Defenses:
         # a) ARP Spoofing / Rogue Gateway
-        threats: List[str] = ThreatDetector.check_arp_spoofing(
-            active_devices, net_info.gateway_ip, net_info.gateway_mac
+        threats: List[str] = []
+        if (
+            authoritative_gw_mac
+            and net_info.gateway_mac
+            and net_info.gateway_mac.upper() != authoritative_gw_mac.upper()
+        ):
+            threats.append(
+                f"CRITICAL: Gateway ARP Cache Poisoning detected on local host! "
+                f"Gateway {net_info.gateway_ip} resolves to {net_info.gateway_mac} "
+                f"(expected pinned MAC {authoritative_gw_mac})."
+            )
+        threats.extend(
+            ThreatDetector.check_arp_spoofing(
+                active_devices, net_info.gateway_ip, authoritative_gw_mac
+            )
         )
         # b) Rogue DHCP Server / Rogue Gateway Probe
         if not bg_defenses.get("rogue_dhcp"):
@@ -903,7 +937,7 @@ class DiscoveryEngine:
                     interface=net_info.interface,
                     local_mac=net_info.local_mac,
                     gateway_ip=net_info.gateway_ip,
-                    gateway_mac=net_info.gateway_mac,
+                    gateway_mac=authoritative_gw_mac,
                 )
             )
         # c) Active LLMNR / NBT-NS Poisoning Canary Trap (Anti-Responder)
@@ -983,13 +1017,16 @@ class DiscoveryEngine:
         # l) Real-Time ARP Cache Poisoning & Gateway Masquerade Guard
         if not bg_defenses.get("arp_poison"):
             trusted_map = {
-                ip: mac for ip, mac in active_devices.items() if mac and mac in whitelist
+                ip: m for ip, m in active_devices.items()
+                if m and m in whitelist and whitelist[m].get("trusted", True)
             }
+            if net_info.gateway_ip and authoritative_gw_mac:
+                trusted_map[net_info.gateway_ip] = authoritative_gw_mac
             threats.extend(
                 ThreatDetector.check_realtime_arp_poisoning(
                     interface=net_info.interface,
                     gateway_ip=net_info.gateway_ip,
-                    gateway_mac=net_info.gateway_mac,
+                    gateway_mac=authoritative_gw_mac,
                     trusted_ip_mac_map=trusted_map,
                     duration=1.0,
                 )

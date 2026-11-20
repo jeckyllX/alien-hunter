@@ -3,63 +3,123 @@ Configuration and Whitelist Management for Alien Hunter.
 Handles generic path resolution, storage, and persistence of trusted devices.
 """
 
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
+import stat
+import tempfile
 import threading
 import time
-from typing import List, Dict, Any, Optional
+from typing import Callable, List, Dict, Any, Optional
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 from .logging_setup import get_logger
 from .models import estimate_initial_ttl
 
 log = get_logger()
+_WHITELIST_LOCK = threading.RLock()
+
+
+@contextmanager
+def _advisory_file_lock(target_path: str):
+    """Cross-process advisory file lock around read-modify-write persistence."""
+    if fcntl is None:
+        yield
+        return
+    abs_target = os.path.abspath(target_path)
+    parent = os.path.dirname(abs_target)
+    lock_path = f"{abs_target}.lock"
+    fd = None
+    try:
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 class ConfigManager:
     """Manages file locations, whitelist persistence, and configuration settings."""
 
     @staticmethod
-    def resolve_path(filename: str, custom_path: Optional[str] = None) -> str:
+    def _is_trusted_cwd() -> bool:
+        """Returns True if cwd is safe to consult for config files."""
+        try:
+            cwd = os.getcwd()
+            st = os.stat(cwd)
+            if st.st_mode & stat.S_IWOTH:
+                return False
+            euid = os.geteuid() if hasattr(os, "geteuid") else 0
+            if euid == 0:
+                allowed_uids = {0}
+                sudo_uid = os.environ.get("SUDO_UID")
+                if sudo_uid and sudo_uid.isdigit():
+                    allowed_uids.add(int(sudo_uid))
+                if st.st_uid not in allowed_uids:
+                    return False
+            return True
+        except OSError:
+            return False
+
+    @classmethod
+    def resolve_path(cls, filename: str, custom_path: Optional[str] = None) -> str:
         """
-        Resolves the configuration file location with a clear fallback hierarchy:
-        1. Explicit custom path provided via CLI
-        2. Current working directory
-        3. Directory containing the package/script
-        4. User's standard config directory (~/.config/alien-hunter/)
+        Resolves the configuration file location with a clear hierarchy:
+        1. Explicit custom path
+        2. Directory containing the package/script (or trusted cwd for non-root)
+        3. User's config directory (~/.config/alien-hunter/)
+        4. System-wide config directory (/etc/alien-hunter/)
         """
         if custom_path and custom_path.strip():
             return os.path.abspath(custom_path)
 
-        # Check current working directory
-        cwd_path = os.path.join(os.getcwd(), filename)
-        if os.path.exists(cwd_path):
-            return cwd_path
-
-        # Check directory of this package
         pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         pkg_path = os.path.join(pkg_dir, filename)
-        if os.path.exists(pkg_path):
-            return pkg_path
-
-        # Check user config directory (~/.config/alien-hunter/)
         sudo_user = os.environ.get("SUDO_USER")
         home = os.path.expanduser(f"~{sudo_user}") if sudo_user else os.path.expanduser("~")
         user_cfg = os.path.join(home, ".config", "alien-hunter", filename)
+        etc_cfg = os.path.join("/etc", "alien-hunter", filename)
+        cwd_path = os.path.join(os.getcwd(), filename)
+
+        euid = os.geteuid() if hasattr(os, "geteuid") else 1000
+        if euid != 0 and os.path.exists(cwd_path) and cls._is_trusted_cwd():
+            return cwd_path
+
+        if os.path.exists(pkg_path):
+            return pkg_path
+
         if os.path.exists(user_cfg):
             return user_cfg
 
-        # Check system-wide config directory (/etc/alien-hunter/)
-        etc_cfg = os.path.join("/etc", "alien-hunter", filename)
         if os.path.exists(etc_cfg):
             return etc_cfg
 
-        # Default fallback to current working directory
-        return cwd_path
+        if euid == 0 and cls._is_trusted_cwd() and os.path.exists(cwd_path):
+            return cwd_path
+
+        # Default fallback to user config directory (or /etc/alien-hunter for root service)
+        if euid == 0 and not sudo_user:
+            return etc_cfg
+        return user_cfg
 
     @staticmethod
-    def load_json(filepath: str, default: Optional[Any] = None) -> Any:
-        """Safely load a JSON file, returning a default value if missing or invalid."""
+    def load_json(filepath: str, default: Optional[Any] = None, strict: bool = False) -> Any:
+        """Safely load a JSON file, raising on parse/IO errors if strict=True."""
         if default is None:
             default = {}
         if not os.path.exists(filepath):
@@ -69,20 +129,31 @@ class ConfigManager:
                 return json.load(f)
         except Exception as e:
             log.debug("Failed to load JSON from %s: %s", filepath, e)
+            if strict:
+                raise
             return default
 
     @staticmethod
-    def save_json(filepath: str, data: Any) -> bool:
-        """Safely and atomically write data to a JSON file."""
+    def save_json(filepath: str, data: Any, mode: Optional[int] = None) -> bool:
+        """Safely and atomically write data to a JSON file, preserving or enforcing file mode."""
         tmp_path = None
         try:
             abs_path = os.path.abspath(filepath)
             parent = os.path.dirname(abs_path)
             if parent and not os.path.exists(parent):
                 os.makedirs(parent, exist_ok=True)
-            tmp_path = f"{abs_path}.tmp.{os.getpid()}.{threading.get_ident()}"
-            with open(tmp_path, "w", encoding="utf-8") as f:
+
+            target_mode = mode
+            if target_mode is None and os.path.exists(abs_path):
+                target_mode = stat.S_IMODE(os.stat(abs_path).st_mode)
+            if target_mode is None:
+                target_mode = 0o644
+
+            fd, tmp_path = tempfile.mkstemp(prefix=".ah_tmp_", suffix=".json", dir=parent or ".")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                os.fchmod(f.fileno(), target_mode)
                 json.dump(data, f, indent=2)
+                f.flush()
             os.replace(tmp_path, abs_path)
             return True
         except Exception as e:
@@ -94,22 +165,50 @@ class ConfigManager:
                     pass
             return False
 
-    def load_whitelist(self, custom_path: Optional[str] = None) -> Dict[str, dict]:
+    def load_whitelist(self, custom_path: Optional[str] = None, strict: bool = False) -> Dict[str, dict]:
         path = self.resolve_path("known_devices.json", custom_path)
-        raw = self.load_json(path, default={})
+        raw = self.load_json(path, default={}, strict=strict)
+        if not isinstance(raw, dict):
+            if strict:
+                raise ValueError(f"Whitelist root must be a JSON object in {path}")
+            return {}
         return {k.upper(): v for k, v in raw.items() if isinstance(v, dict)}
 
     def save_whitelist(self, whitelist: Dict[str, dict], custom_path: Optional[str] = None) -> bool:
         path = self.resolve_path("known_devices.json", custom_path)
         return self.save_json(path, whitelist)
 
-    def load_config(self, custom_path: Optional[str] = None) -> Dict[str, Any]:
+    def load_config(self, custom_path: Optional[str] = None, strict: bool = False) -> Dict[str, Any]:
         path = self.resolve_path("config.json", custom_path)
-        return self.load_json(path, default={})
+        raw = self.load_json(path, default={}, strict=strict)
+        if not isinstance(raw, dict):
+            if strict:
+                raise ValueError(f"Config root must be a JSON object in {path}")
+            return {}
+        return raw
 
     def save_config(self, config: Dict[str, Any], custom_path: Optional[str] = None) -> bool:
         path = self.resolve_path("config.json", custom_path)
-        return self.save_json(path, config)
+        return self.save_json(path, config, mode=0o600)
+
+    def update_whitelist_entry(
+        self,
+        mac: str,
+        updater: Callable[[Optional[dict]], dict],
+        custom_path: Optional[str] = None,
+    ) -> dict:
+        """Atomically updates or inserts a whitelist entry under process + file lock."""
+        path = self.resolve_path("known_devices.json", custom_path)
+        mac_upper = mac.strip().upper()
+        with _WHITELIST_LOCK:
+            with _advisory_file_lock(path):
+                whitelist = self.load_whitelist(path, strict=True)
+                existing = whitelist.get(mac_upper)
+                updated_entry = updater(dict(existing) if isinstance(existing, dict) else None)
+                whitelist[mac_upper] = updated_entry
+                if not self.save_whitelist(whitelist, path):
+                    raise OSError(f"Failed to persist whitelist to {path}")
+                return updated_entry
 
     def sync_device_inventory(
         self,
@@ -123,7 +222,23 @@ class ConfigManager:
         preserving user-configured fields like name, owner, and device_type.
         Uses Python ipaddress for clean, RFC-compliant topological subnet prioritization.
         """
-        raw = self.load_whitelist(custom_path)
+        path = self.resolve_path("known_devices.json", custom_path)
+        with _WHITELIST_LOCK:
+            with _advisory_file_lock(path):
+                try:
+                    raw = self.load_whitelist(path, strict=True)
+                except Exception as e:
+                    log.debug("Skipping inventory sync because whitelist failed to parse: %s", e)
+                    return False
+                return self._sync_device_inventory_locked(raw, path, devices, subnet_cidr)
+
+    def _sync_device_inventory_locked(
+        self,
+        raw: Dict[str, dict],
+        path: str,
+        devices: List[Any],
+        subnet_cidr: Optional[str] = None,
+    ) -> bool:
         modified = False
 
         local_net = None
@@ -240,18 +355,15 @@ class ConfigManager:
                     modified = True
 
             open_ports = getattr(dev, "open_ports", [])
-            if open_ports:
+            if open_ports and "ports" not in entry and "baseline_ports" not in entry:
                 def _port_key(p: Any) -> int:
                     try:
                         return int(str(p).split("/")[0])
                     except (ValueError, IndexError):
                         return 99999
 
-                existing_ports = set(entry.get("ports", []))
-                merged_ports = sorted(list(existing_ports | set(open_ports)), key=_port_key)
-                if merged_ports != entry.get("ports"):
-                    entry["ports"] = merged_ports
-                    modified = True
+                entry["ports"] = sorted(list(set(open_ports)), key=_port_key)
+                modified = True
 
             # Persist stack baseline metrics for trusted device spoofing detection
             observed_ttl = getattr(dev, "observed_ttl", None)
@@ -270,5 +382,5 @@ class ConfigManager:
             modified = True
 
         if modified:
-            return self.save_whitelist(raw, custom_path)
+            return self.save_whitelist(raw, path)
         return True

@@ -4,9 +4,10 @@ Directly interrogates the local router's DNS server to uncover registered hostna
 and DHCP leases for sleeping, firewalled, or power-saving mobile devices.
 """
 
+import os
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 
 class RouterDnsAuditor:
@@ -16,10 +17,17 @@ class RouterDnsAuditor:
         self.gateway_ip = gateway_ip
 
     @staticmethod
-    def parse_dns_name(data: bytes, offset: int) -> Tuple[str, int]:
+    def parse_dns_name(
+        data: bytes,
+        offset: int,
+        _visited: Optional[Set[int]] = None,
+        _depth: int = 0,
+    ) -> Tuple[str, int]:
         """Parses a DNS name from raw wire bytes, following compression pointers (0xC0)."""
+        if _depth > 16:
+            return "", offset
         labels = []
-        visited = set()
+        visited = _visited if _visited is not None else set()
         p = offset
 
         while p < len(data):
@@ -32,14 +40,20 @@ class RouterDnsAuditor:
                 p += 1
                 break
             elif (length & 0xC0) == 0xC0:
+                if p + 1 >= len(data):
+                    break
                 # Compression pointer: 14-bit offset
                 ptr = int.from_bytes(data[p:p + 2], "big") & 0x3FFF
-                sub_name, _ = RouterDnsAuditor.parse_dns_name(data, ptr)
+                sub_name, _ = RouterDnsAuditor.parse_dns_name(
+                    data, ptr, _visited=visited, _depth=_depth + 1
+                )
                 labels.append(sub_name)
                 p += 2
                 break
             else:
                 p += 1
+                if p + length > len(data):
+                    break
                 labels.append(data[p:p + length].decode("latin1", errors="ignore"))
                 p += length
 
@@ -72,8 +86,9 @@ class RouterDnsAuditor:
             ip = f"{subnet_base}.{host_id}"
             rev_name = f"{host_id}.{rev_suffix}"
 
+            txid = os.urandom(2)
             # Standard DNS PTR query packet
-            q = b"\xaa\xbb\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+            q = txid + b"\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
             for label in rev_name.split("."):
                 q += bytes([len(label)]) + label.encode()
             q += b"\x00\x00\x0c\x00\x01"  # Type=PTR(12), Class=IN(1)
@@ -83,20 +98,36 @@ class RouterDnsAuditor:
             try:
                 s.sendto(q, (self.gateway_ip, 53))
                 data, _ = s.recvfrom(512)
-                rcode = data[3] & 0x0F
+                if len(data) < 12 or data[:2] != txid:
+                    return ip, None
+                flags = int.from_bytes(data[2:4], "big")
+                if not (flags & 0x8000):  # Must be DNS response
+                    return ip, None
+                rcode = flags & 0x0F
+                qdcount = int.from_bytes(data[4:6], "big")
                 ancount = int.from_bytes(data[6:8], "big")
 
                 if rcode == 0 and ancount > 0:
-                    # Skip header (12 bytes) + question
                     p = 12
-                    _, p = self.parse_dns_name(data, p)
-                    p += 4  # qtype, qclass
-                    # Parse Answer section
-                    _, p = self.parse_dns_name(data, p)
-                    p += 8  # type, class, ttl
-                    p += 2  # rdlength
-                    rname, _ = self.parse_dns_name(data, p)
-                    return ip, rname
+                    for _ in range(qdcount):
+                        _, p = self.parse_dns_name(data, p)
+                        p += 4  # qtype, qclass
+                    for _ in range(ancount):
+                        if p >= len(data):
+                            break
+                        _, p = self.parse_dns_name(data, p)
+                        if p + 10 > len(data):
+                            break
+                        rr_type = int.from_bytes(data[p:p + 2], "big")
+                        rdlength = int.from_bytes(data[p + 8:p + 10], "big")
+                        p += 10
+                        if p + rdlength > len(data):
+                            break
+                        if rr_type == 12:  # PTR
+                            rname, _ = self.parse_dns_name(data, p)
+                            if rname:
+                                return ip, rname
+                        p += rdlength
             except Exception:
                 pass
             finally:

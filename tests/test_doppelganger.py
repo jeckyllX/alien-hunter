@@ -214,6 +214,17 @@ class TestHardwareDoppelganger(unittest.TestCase):
         self.assertIn("MAC Spoofing", threats_apple[0])
         self.assertIn("OS Stack Masquerade", threats_apple[1])
 
+    def test_cisco_ios_matches_network_profile_and_conflicts_with_windows(self):
+        from alien_hunter.models import OsFamily
+        profile = DoppelgangerDetector.match_profile("Cisco IOS 15.x")
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.family, OsFamily.NETWORK)
+        self.assertEqual(profile.expected_ttl.value, 255)
+        self.assertTrue(DoppelgangerDetector.is_os_family_conflict(OsFamily.NETWORK, OsFamily.WINDOWS))
+        self.assertTrue(DoppelgangerDetector.is_os_family_conflict(OsFamily.NETWORK, OsFamily.LINUX_IOT))
+        # "bios" substring must not falsely match "ios" Apple profile
+        self.assertIsNone(DoppelgangerDetector.match_profile("AMI BIOS Firmware"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -310,6 +310,34 @@ class TestRogueDhcpGuard(unittest.TestCase):
         self.assertIn("Rogue DHCP Server detected", threats[0])
         self.assertIn("[Canary Trap]", threats[0])
 
+    def test_spoofed_option54_from_unauthorized_src_ip_and_dns_hijack(self):
+        # Attacker IP 198.51.100.99 claims Option 54 server_id == 198.51.100.1 (gateway)
+        guard = RogueDhcpGuard(
+            gateway_ip="198.51.100.1",
+            gateway_mac="02:00:00:00:00:01",
+            authorized_dns_servers={"198.51.100.1"},
+            alert_cooldown=30.0,
+        )
+        extra = bytes([6, 4]) + socket.inet_aton("203.0.113.200")  # Option 6 rogue DNS
+        payload = self._build_dhcp_reply_payload(
+            xid=b"\x01\x02\x03\x04",
+            server_ip="198.51.100.1",
+            router_ip="198.51.100.1",
+        )
+        # Insert Option 6 before 0xFF end marker
+        payload = payload[:-1] + extra + b"\xff"
+        l2_frame = self._build_l2_frame(
+            eth_src="02:00:00:00:00:01",
+            eth_dst="FF:FF:FF:FF:FF:FF",
+            src_ip="198.51.100.99",
+            dst_ip="255.255.255.255",
+            dhcp_payload=payload,
+        )
+        events = guard.process_packet(l2_frame)
+        types = {e.threat_type for e in events}
+        self.assertIn("ROGUE_SERVER", types)
+        self.assertIn("DNS_HIJACK", types)
+
 
 if __name__ == "__main__":
     unittest.main()

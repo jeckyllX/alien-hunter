@@ -121,12 +121,15 @@ class PassiveFrameSniffer:
                                         pass
                                 elif ip_proto == 17 and len(pkt) >= 42:  # UDP
                                     try:
+                                        if (pkt[14] >> 4) != 4:
+                                            continue
                                         ihl = (pkt[14] & 0x0F) * 4
-                                        if len(pkt) >= 14 + ihl + 8:
-                                            dst_port = struct.unpack("!H", pkt[14 + ihl + 2 : 14 + ihl + 4])[0]
-                                            if dst_port == 1900:
-                                                payload = pkt[14 + ihl + 8 :]
-                                                SsdpParser.process_payload(payload, src_ip)
+                                        if ihl < 20 or len(pkt) < 14 + ihl + 8:
+                                            continue
+                                        dst_port = struct.unpack("!H", pkt[14 + ihl + 2 : 14 + ihl + 4])[0]
+                                        if dst_port == 1900:
+                                            payload = pkt[14 + ihl + 8 :]
+                                            SsdpParser.process_payload(payload, src_ip)
                                     except Exception:
                                         pass
                             except Exception:

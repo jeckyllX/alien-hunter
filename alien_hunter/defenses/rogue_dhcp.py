@@ -122,6 +122,7 @@ class RogueDhcpGuard:
         gateway_mac: Optional[str] = None,
         authorized_dhcp_ips: Optional[Set[str]] = None,
         authorized_dhcp_macs: Optional[Set[str]] = None,
+        authorized_dns_servers: Optional[Set[str]] = None,
         alert_cooldown: float = 30.0,
     ):
         self.interface = interface
@@ -129,6 +130,7 @@ class RogueDhcpGuard:
         self.gateway_mac = gateway_mac.upper() if gateway_mac else None
         self.authorized_dhcp_ips: Set[str] = set(authorized_dhcp_ips or [])
         self.authorized_dhcp_macs: Set[str] = {m.upper() for m in (authorized_dhcp_macs or [])}
+        self.authorized_dns_servers: Set[str] = set(authorized_dns_servers or [])
 
         if self.gateway_ip:
             self.authorized_dhcp_ips.add(self.gateway_ip)
@@ -138,7 +140,7 @@ class RogueDhcpGuard:
         self.alert_cooldown = alert_cooldown
 
         # Telemetry: server_ip -> details dict
-        self._observed_servers: Dict[str, Dict[str, Any]] = {}
+        self._observed_servers: collections.OrderedDict = collections.OrderedDict()
         # Cooldown: (threat_type, server_ip, server_mac) -> timestamp
         self._last_alert_times: Dict[Tuple[str, str, str], float] = collections.defaultdict(float)
         self._detected_events: collections.deque = collections.deque(maxlen=250)
@@ -152,6 +154,7 @@ class RogueDhcpGuard:
         gateway_mac: Optional[str] = None,
         authorized_dhcp_ips: Optional[Set[str]] = None,
         authorized_dhcp_macs: Optional[Set[str]] = None,
+        authorized_dns_servers: Optional[Set[str]] = None,
     ):
         """Updates network baseline and trusted DHCP server identities dynamically."""
         with self._lock:
@@ -165,6 +168,8 @@ class RogueDhcpGuard:
                 self.authorized_dhcp_ips.update(authorized_dhcp_ips)
             if authorized_dhcp_macs is not None:
                 self.authorized_dhcp_macs.update({m.upper() for m in authorized_dhcp_macs})
+            if authorized_dns_servers is not None:
+                self.authorized_dns_servers.update(authorized_dns_servers)
 
     @staticmethod
     def _calc_ip_checksum(data: bytes) -> int:
@@ -244,7 +249,7 @@ class RogueDhcpGuard:
         return eth_hdr + ip_hdr + udp_hdr + dhcp_payload
 
     @classmethod
-    def parse_dhcp_packet(cls, pkt: bytes) -> Optional[Dict[str, Any]]:
+    def parse_dhcp_packet(cls, pkt: bytes, is_raw_ethernet: Optional[bool] = None) -> Optional[Dict[str, Any]]:
         """
         Parses raw Layer-2 Ethernet frame or bare UDP datagram into DHCP fields.
         Returns parsed dict or None if invalid or not a DHCP frame.
@@ -257,8 +262,15 @@ class RogueDhcpGuard:
         dst_port = None
         bootp_data = None
 
+        parse_as_l2 = (
+            is_raw_ethernet is True
+            or (is_raw_ethernet is None and len(pkt) >= 282 and struct.unpack("!H", pkt[12:14])[0] == 0x0800)
+        )
+
         # Check if frame has Ethernet Header (14 bytes)
-        if len(pkt) >= 282 and struct.unpack("!H", pkt[12:14])[0] == 0x0800:
+        if parse_as_l2:
+            if len(pkt) < 282 or struct.unpack("!H", pkt[12:14])[0] != 0x0800:
+                return None
             dst_mac = ":".join(f"{b:02X}" for b in pkt[0:6])
             src_mac = ":".join(f"{b:02X}" for b in pkt[6:12])
 
@@ -278,10 +290,12 @@ class RogueDhcpGuard:
 
             udp_off = 14 + ihl
             src_port, dst_port = struct.unpack("!HH", pkt[udp_off : udp_off + 4])
+            if src_port != 67 and dst_port != 68:
+                return None
             bootp_data = pkt[udp_off + 8 :]
 
         # Bare UDP / BOOTP packet (e.g. from recvfrom on UDP socket)
-        elif len(pkt) >= 240:
+        elif is_raw_ethernet is False or len(pkt) >= 240:
             bootp_data = pkt
 
         if not bootp_data or len(bootp_data) < 240:
@@ -379,12 +393,14 @@ class RogueDhcpGuard:
         now: Optional[float] = None,
         expected_xid: Optional[bytes] = None,
         is_canary: bool = False,
+        peer_ip: Optional[str] = None,
+        is_raw_ethernet: Optional[bool] = None,
     ) -> List[RogueDhcpEvent]:
         """
         Inspects an incoming frame. Identifies rogue DHCPOFFER and DHCPACK packets,
         detects gateway hijacking, and tracks active DHCP servers.
         """
-        parsed = self.parse_dhcp_packet(pkt)
+        parsed = self.parse_dhcp_packet(pkt, is_raw_ethernet=is_raw_ethernet)
         if not parsed:
             return []
 
@@ -404,7 +420,8 @@ class RogueDhcpGuard:
         if now is None:
             now = time.time()
 
-        server_ip = parsed.get("server_id") or parsed.get("src_ip") or parsed.get("siaddr") or "0.0.0.0"
+        effective_src_ip = parsed.get("src_ip") or peer_ip
+        server_ip = parsed.get("server_id") or effective_src_ip or parsed.get("siaddr") or "0.0.0.0"
         server_mac = parsed.get("src_mac") or ""
         offered_router = parsed["routers"][0] if parsed["routers"] else None
         offered_ip = parsed["yiaddr"] if parsed["yiaddr"] != "0.0.0.0" else None
@@ -412,7 +429,15 @@ class RogueDhcpGuard:
         events: List[RogueDhcpEvent] = []
 
         with self._lock:
-            # Track server inventory
+            if len(self._last_alert_times) > 2048:
+                oldest_key = min(self._last_alert_times.keys(), key=lambda k: self._last_alert_times[k])
+                del self._last_alert_times[oldest_key]
+
+            # Track bounded server inventory
+            if server_ip in self._observed_servers:
+                self._observed_servers.move_to_end(server_ip)
+            elif len(self._observed_servers) >= 512:
+                self._observed_servers.popitem(last=False)
             self._observed_servers[server_ip] = {
                 "server_ip": server_ip,
                 "server_mac": server_mac,
@@ -425,12 +450,17 @@ class RogueDhcpGuard:
                 "last_seen": now,
             }
 
-            # 1. Check for Rogue DHCP Server identity
-            is_authorized_ip = (
-                not self.authorized_dhcp_ips
-                or server_ip in self.authorized_dhcp_ips
-                or (parsed.get("src_ip") and parsed["src_ip"] in self.authorized_dhcp_ips)
-            )
+            # 1. Check for Rogue DHCP Server identity (require both Option 54 server_id and peer/src IP to match authorized set)
+            opt_server_id = parsed.get("server_id")
+            if self.authorized_dhcp_ips:
+                id_ok = (server_ip in self.authorized_dhcp_ips) and (
+                    opt_server_id is None or opt_server_id in self.authorized_dhcp_ips
+                )
+                src_ok = (effective_src_ip is None) or (effective_src_ip in self.authorized_dhcp_ips)
+                mismatch = bool(opt_server_id and effective_src_ip and opt_server_id != effective_src_ip)
+                is_authorized_ip = id_ok and src_ok and not mismatch
+            else:
+                is_authorized_ip = True
 
             is_authorized_mac = (
                 not self.authorized_dhcp_macs
@@ -484,6 +514,31 @@ class RogueDhcpGuard:
                     )
                     self._detected_events.append(ev)
                     events.append(ev)
+
+            # 3. Check for unauthorized DNS servers if configured
+            if self.authorized_dns_servers and parsed["dns_servers"]:
+                unauthorized_dns = [d for d in parsed["dns_servers"] if d not in self.authorized_dns_servers]
+                if unauthorized_dns:
+                    key = ("DNS_HIJACK", server_ip, ",".join(sorted(unauthorized_dns)))
+                    if now - self._last_alert_times[key] >= self.alert_cooldown:
+                        self._last_alert_times[key] = now
+                        ev = RogueDhcpEvent(
+                            threat_type="DNS_HIJACK",
+                            server_ip=server_ip,
+                            server_mac=server_mac,
+                            offered_ip=offered_ip,
+                            offered_router=offered_router,
+                            offered_dns=parsed["dns_servers"],
+                            offered_domain=parsed["domain_name"],
+                            lease_time=parsed["lease_time"],
+                            server_id=parsed.get("server_id"),
+                            expected_gateway_ip=self.gateway_ip,
+                            expected_gateway_mac=self.gateway_mac,
+                            is_canary=is_canary,
+                            timestamp=now,
+                        )
+                        self._detected_events.append(ev)
+                        events.append(ev)
 
         return events
 
@@ -571,20 +626,24 @@ class RogueDhcpGuard:
             start_time = time.time()
             active_sock = raw_sock if raw_sock else udp_sock
 
+            is_raw = bool(raw_sock)
             while time.time() - start_time < timeout:
                 try:
                     data, addr = active_sock.recvfrom(2048)
+                    peer_ip = addr[0] if (not is_raw and isinstance(addr, tuple) and addr) else None
                     evs = self.process_packet(
                         data,
                         expected_xid=canary_xid,
                         is_canary=True,
+                        peer_ip=peer_ip,
+                        is_raw_ethernet=is_raw,
                     )
                     if evs:
                         events.extend(evs)
 
-                    parsed = self.parse_dhcp_packet(data)
+                    parsed = self.parse_dhcp_packet(data, is_raw_ethernet=is_raw)
                     if parsed and parsed["op"] == 2 and parsed["xid"] == canary_xid:
-                        srv_key = parsed.get("server_id") or parsed.get("src_ip") or addr[0]
+                        srv_key = peer_ip or parsed.get("src_ip") or parsed.get("server_id") or "unknown"
                         observed_probe_servers[srv_key] = parsed
 
                 except socket.timeout:
@@ -597,18 +656,18 @@ class RogueDhcpGuard:
                 server_list = list(observed_probe_servers.keys())
                 now = time.time()
                 key = ("MULTIPLE_SERVERS", ",".join(sorted(server_list)), "")
-                if now - self._last_alert_times[key] >= self.alert_cooldown:
-                    self._last_alert_times[key] = now
-                    multi_ev = RogueDhcpEvent(
-                        threat_type="MULTIPLE_SERVERS",
-                        server_ip=server_list[0],
-                        multiple_servers=server_list,
-                        is_canary=True,
-                        timestamp=now,
-                    )
-                    with self._lock:
+                with self._lock:
+                    if now - self._last_alert_times[key] >= self.alert_cooldown:
+                        self._last_alert_times[key] = now
+                        multi_ev = RogueDhcpEvent(
+                            threat_type="MULTIPLE_SERVERS",
+                            server_ip=server_list[0],
+                            multiple_servers=server_list,
+                            is_canary=True,
+                            timestamp=now,
+                        )
                         self._detected_events.append(multi_ev)
-                    events.append(multi_ev)
+                        events.append(multi_ev)
 
         except Exception:
             pass
@@ -657,7 +716,7 @@ class RogueDhcpGuard:
             while time.time() - start_time < duration:
                 try:
                     pkt, _ = raw_sock.recvfrom(2048)
-                    evs = self.process_packet(pkt, is_canary=False)
+                    evs = self.process_packet(pkt, is_canary=False, is_raw_ethernet=True)
                     if evs:
                         events.extend(evs)
                 except socket.timeout:
@@ -701,7 +760,7 @@ class RogueDhcpGuard:
         """Stops background listener thread."""
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
 
     @property
     def is_running(self) -> bool:
@@ -723,11 +782,11 @@ class RogueDhcpGuard:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(1.0)
+            raw_sock.settimeout(0.25)
             while self._running:
                 try:
                     pkt, _ = raw_sock.recvfrom(2048)
-                    self.process_packet(pkt, is_canary=False)
+                    self.process_packet(pkt, is_canary=False, is_raw_ethernet=True)
                 except socket.timeout:
                     continue
                 except Exception:
@@ -735,6 +794,7 @@ class RogueDhcpGuard:
         except Exception:
             pass
         finally:
+            self._running = False
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,

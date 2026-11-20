@@ -61,6 +61,8 @@ class IcmpRedirectGuard:
     are virtually never legitimate and indicate active route manipulation.
     """
 
+    MAX_RATE_LIMIT_KEYS = 2048
+
     def __init__(
         self,
         interface: Optional[str] = None,
@@ -80,8 +82,12 @@ class IcmpRedirectGuard:
 
         self._threat_queue: deque = deque(maxlen=history_maxlen)
         self._event_history: deque = deque(maxlen=history_maxlen)
-        # Key: (sender_ip, new_gateway, orig_dest_ip) -> (last_time, count)
+        # Key: (sender_ip, new_gateway, orig_dest_ip) -> (last_emit_time, suppressed_count)
         self._rate_limits: Dict[Tuple[str, str, str], Tuple[float, int]] = {}
+
+    @property
+    def is_running(self) -> bool:
+        return self.running
 
     def update_topology(self, gateway_ip: Optional[str] = None, local_ip: Optional[str] = None):
         """Updates local network topology attributes dynamically."""
@@ -99,7 +105,7 @@ class IcmpRedirectGuard:
 
             try:
                 self._socket = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-                self._socket.settimeout(1.0)
+                self._socket.settimeout(0.25)
 
                 # Bind socket to specific interface if specified (Linux SO_BINDTODEVICE)
                 if self.interface:
@@ -118,13 +124,17 @@ class IcmpRedirectGuard:
                 return False
 
     def stop(self):
-        """Stops the sniffing thread and cleanly closes the raw socket."""
+        """Stops the sniffing thread cleanly and ensures raw socket is closed."""
         with self._lock:
             self.running = False
-            self._cleanup_socket()
+            thread = self._thread
 
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.5)
+        if thread and thread.is_alive():
+            thread.join(timeout=1.5)
+
+        if not thread or not thread.is_alive():
+            with self._lock:
+                self._cleanup_socket()
 
     def _cleanup_socket(self):
         if self._socket:
@@ -136,23 +146,29 @@ class IcmpRedirectGuard:
 
     def _sniff_loop(self):
         """Background thread loop receiving and evaluating ICMP packets."""
-        while self.running:
-            sock = self._socket
-            if not sock:
-                break
-
-            try:
-                data, addr = sock.recvfrom(65535)
-                sender_ip = addr[0] if addr else ""
-                event = self.parse_icmp_packet(data, sender_ip)
-                if event:
-                    self._record_event(event)
-            except socket.timeout:
-                continue
-            except OSError:
-                if not self.running:
+        try:
+            while self.running:
+                with self._lock:
+                    sock = self._socket
+                if not sock:
                     break
-                time.sleep(0.1)
+
+                try:
+                    data, addr = sock.recvfrom(65535)
+                    sender_ip = addr[0] if addr else ""
+                    event = self.parse_icmp_packet(data, sender_ip)
+                    if event:
+                        self._record_event(event)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    if not self.running:
+                        break
+                    time.sleep(0.1)
+        finally:
+            with self._lock:
+                self.running = False
+                self._cleanup_socket()
 
     def parse_icmp_packet(self, data: bytes, sender_ip: str = "") -> Optional[IcmpRedirectEvent]:
         """
@@ -168,7 +184,7 @@ class IcmpRedirectGuard:
             return None
 
         ihl = (data[0] & 0x0F) * 4
-        if len(data) < ihl + 8:
+        if ihl < 20 or len(data) < ihl + 8:
             return None
 
         src_ip = socket.inet_ntoa(data[12:16])
@@ -207,17 +223,28 @@ class IcmpRedirectGuard:
         )
 
     def _record_event(self, event: IcmpRedirectEvent):
-        """Thread-safely stores and deduplicates redirect alerts within a 15-second window."""
+        """Thread-safely stores and deduplicates redirect alerts within a fixed 15-second window."""
         with self._lock:
             key = (event.sender_ip, event.new_gateway, event.orig_dest_ip)
             now = event.timestamp
-            last_time, count = self._rate_limits.get(key, (0.0, 0))
+            last_time, suppressed = self._rate_limits.get(key, (0.0, 0))
 
-            if now - last_time < 15.0:
-                self._rate_limits[key] = (now, count + 1)
+            if last_time > 0.0 and now - last_time < 15.0:
+                self._rate_limits[key] = (last_time, suppressed + 1)
                 return
 
-            self._rate_limits[key] = (now, 1)
+            if last_time > 0.0 and suppressed > 0:
+                event.burst_count = max(event.burst_count, 1 + suppressed)
+
+            if key not in self._rate_limits and len(self._rate_limits) >= self.MAX_RATE_LIMIT_KEYS:
+                expired = [k for k, (ts, _) in self._rate_limits.items() if now - ts >= 15.0]
+                for ek in expired:
+                    del self._rate_limits[ek]
+                if len(self._rate_limits) >= self.MAX_RATE_LIMIT_KEYS:
+                    oldest_key = min(self._rate_limits, key=lambda k: self._rate_limits[k][0])
+                    self._rate_limits.pop(oldest_key, None)
+
+            self._rate_limits[key] = (now, 0)
             self._event_history.append(event)
             self._threat_queue.append(event.to_threat_string())
 

@@ -34,7 +34,7 @@ class OpenAICompatibleProvider(BaseAIProvider):
 
         if not self.api_key:
             env_var = f"{provider_name.upper()}_API_KEY"
-            self.api_key = os.environ.get(env_var, os.environ.get("OPENAI_API_KEY", "")).strip()
+            self.api_key = os.environ.get(env_var, "").strip()
 
         if not self.endpoint:
             self.endpoint = self.DEFAULT_ENDPOINTS.get(
@@ -67,11 +67,15 @@ class OpenAICompatibleProvider(BaseAIProvider):
             "max_tokens": max_tokens,
         }
 
-        resp_data = self._post_json(self.endpoint, payload, headers=headers)
-        if not resp_data:
-            # Fallback retry without response_format in case local server doesn't support json_object mode
+        resp_data, status_code = self._post_json_with_status(
+            self.endpoint, payload, headers=headers
+        )
+        if not resp_data and status_code in (400, 422):
+            # Fallback retry without response_format in case endpoint rejects json_object mode
             payload.pop("response_format", None)
-            resp_data = self._post_json(self.endpoint, payload, headers=headers)
+            resp_data, _ = self._post_json_with_status(
+                self.endpoint, payload, headers=headers
+            )
 
         if not resp_data:
             return None

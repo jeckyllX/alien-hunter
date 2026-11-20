@@ -112,8 +112,8 @@ class SynScanDetector:
             except Exception:
                 self._local_network = None
 
-        # State tracking: src_ip -> list of probe dicts
-        self._probes: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
+        # State tracking: src_ip -> bounded probe history
+        self._probes: Dict[str, List[Dict[str, Any]]] = collections.OrderedDict()
         self._last_alert_time: Dict[str, float] = {}
         self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
@@ -143,6 +143,11 @@ class SynScanDetector:
 
         ihl = (v_ihl & 0x0F) * 4
         if ihl < 20 or len(pkt) < 14 + ihl + 20:
+            return None
+
+        # Reject non-initial IPv4 fragments (payload bytes would be misread as TCP flags)
+        frag_offset = struct.unpack("!H", pkt[20:22])[0] & 0x1FFF
+        if frag_offset != 0:
             return None
 
         proto = pkt[23]
@@ -225,9 +230,10 @@ class SynScanDetector:
             now = time.time()
 
         with self._lock:
-            # Prune probes outside the sliding window
+            # Prune probes outside the sliding window and bound per-IP & total tracking
             cutoff = now - self.window_seconds
-            probes = [p for p in self._probes[src_ip] if p["timestamp"] >= cutoff]
+            existing_probes = self._probes.get(src_ip, [])
+            probes = [p for p in existing_probes if p["timestamp"] >= cutoff]
             probes.append(
                 {
                     "timestamp": now,
@@ -237,12 +243,20 @@ class SynScanDetector:
                     "scan_type": scan_type,
                 }
             )
-            self._probes[src_ip] = probes
-
-            if len(self._probes) > 1000:
+            if len(probes) > 256:
+                probes = probes[-256:]
+            if src_ip in self._probes:
+                self._probes.move_to_end(src_ip)
+            elif len(self._probes) >= 2048:
                 expired = [k for k, v in self._probes.items() if not v or v[-1]["timestamp"] < cutoff]
                 for k in expired:
                     del self._probes[k]
+                while len(self._probes) >= 2048:
+                    self._probes.popitem(last=False)
+            self._probes[src_ip] = probes
+            if len(self._last_alert_time) > 2048:
+                oldest_alert_ip = min(self._last_alert_time.keys(), key=lambda k: self._last_alert_time[k])
+                del self._last_alert_time[oldest_alert_ip]
 
             # Immediate alert for abnormal non-SYN scans (NULL, FIN, XMAS have 0 legitimate use)
             if scan_type in ("NULL Scan", "FIN Scan", "XMAS Scan"):
@@ -386,7 +400,11 @@ class SynScanDetector:
         """Stops the background listener thread."""
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     def _sniff_loop(self):
         """Continuous sniffing loop executed in background daemon thread."""
@@ -404,7 +422,7 @@ class SynScanDetector:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(1.0)
+            raw_sock.settimeout(0.25)
             while self._running:
                 try:
                     pkt, _ = raw_sock.recvfrom(2048)
@@ -416,6 +434,7 @@ class SynScanDetector:
         except Exception:
             pass
         finally:
+            self._running = False
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,

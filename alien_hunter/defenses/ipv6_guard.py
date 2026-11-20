@@ -4,6 +4,7 @@ Audits IPv6 local link traffic for rogue Router Advertisements (ICMPv6 Type 134)
 and unauthorized RDNSS recursive DNS servers attempting to hijack LAN traffic.
 """
 
+import ipaddress
 import os
 import socket
 import struct
@@ -19,6 +20,17 @@ class Ipv6Guard:
     ICMPV6_ROUTER_SOLICIT = 133
     ICMPV6_ROUTER_ADVERT = 134
     ALL_ROUTERS_MULTICAST = "ff02::2"
+
+    @staticmethod
+    def _normalize_ipv6(ip: Optional[str]) -> Optional[str]:
+        """Normalizes an IPv6 address (stripping optional %zone suffix)."""
+        if not ip:
+            return None
+        clean = ip.strip().split("%", 1)[0]
+        try:
+            return str(ipaddress.IPv6Address(clean))
+        except ValueError:
+            return clean.lower()
 
     @staticmethod
     def is_ipv6_supported() -> bool:
@@ -103,7 +115,21 @@ class Ipv6Guard:
             sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
             sock.settimeout(0.3)
 
+            # RFC 4861 requires Hop Limit = 255 for Router Solicitation messages
+            try:
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+            except OSError:
+                pass
+
+            scope_id = 0
             if interface:
+                try:
+                    scope_id = socket.if_nametoindex(interface)
+                    sock.setsockopt(
+                        socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, struct.pack("I", scope_id)
+                    )
+                except OSError:
+                    scope_id = 0
                 try:
                     sock.setsockopt(socket.SOL_SOCKET, 25, interface.encode("utf-8"))  # SO_BINDTODEVICE
                 except Exception:
@@ -111,8 +137,8 @@ class Ipv6Guard:
 
             rs_pkt = cls.build_router_solicitation()
             try:
-                # Target all-routers multicast
-                sock.sendto(rs_pkt, (cls.ALL_ROUTERS_MULTICAST, 0, 0, 0))
+                # Target all-routers link-local multicast with interface scope_id
+                sock.sendto(rs_pkt, (cls.ALL_ROUTERS_MULTICAST, 0, 0, scope_id))
             except Exception:
                 pass
 
@@ -122,25 +148,31 @@ class Ipv6Guard:
             while time.time() - start_time < timeout:
                 try:
                     data, addr = sock.recvfrom(2048)
-                    src_ip = addr[0]
-                    parsed = cls.parse_router_advertisement(data, src_ip)
+                    raw_src_ip = addr[0]
+                    src_norm = cls._normalize_ipv6(raw_src_ip) or raw_src_ip
+                    parsed = cls.parse_router_advertisement(data, src_norm)
                     if parsed:
-                        discovered_routers[src_ip] = parsed
+                        discovered_routers[src_norm] = parsed
                 except socket.timeout:
                     continue
                 except Exception:
                     break
 
+            expected_none = expected_gateway_ipv6 is not None and expected_gateway_ipv6.strip() == ""
+            expected_norm = None if expected_none else cls._normalize_ipv6(expected_gateway_ipv6)
+
             # Evaluate discovered IPv6 routers
             for r_ip, r_data in discovered_routers.items():
-                if r_data["is_default_gateway"]:
-                    if expected_gateway_ipv6 and r_ip != expected_gateway_ipv6:
-                        rdnss_str = f" with DNS {', '.join(r_data['rdnss'])}" if r_data["rdnss"] else ""
-                        threats.append(
-                            f"CRITICAL: Rogue IPv6 Gateway / mitm6 Attack Detected! "
-                            f"Host {r_ip} is broadcasting ICMPv6 Router Advertisements claiming default route{rdnss_str} "
-                            f"(Expected: {expected_gateway_ipv6})! Potential MitM hijack of Windows IPv6 traffic."
-                        )
+                if r_data["is_default_gateway"] and (
+                    expected_none or (expected_norm and r_ip != expected_norm)
+                ):
+                    rdnss_str = f" with DNS {', '.join(r_data['rdnss'])}" if r_data["rdnss"] else ""
+                    expected_disp = "None (IPv6 router disabled)" if expected_none else expected_norm
+                    threats.append(
+                        f"CRITICAL: Rogue IPv6 Gateway / mitm6 Attack Detected! "
+                        f"Host {r_ip} is broadcasting ICMPv6 Router Advertisements claiming default route{rdnss_str} "
+                        f"(Expected: {expected_disp})! Potential MitM hijack of Windows IPv6 traffic."
+                    )
 
             if len(discovered_routers) > 1:
                 routers_str = ", ".join(discovered_routers.keys())

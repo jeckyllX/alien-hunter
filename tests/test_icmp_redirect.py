@@ -166,6 +166,25 @@ class TestIcmpRedirectGuard(unittest.TestCase):
         self.assertEqual(self.guard.gateway_ip, "192.168.1.254")
         self.assertEqual(self.guard.local_ip, "192.168.1.120")
 
+    def test_rejects_invalid_ihl_and_fixed_cooldown_window(self):
+        bad_pkt = bytearray(build_icmp_redirect_packet("198.51.100.5", "198.51.100.10", "198.51.100.99", "203.0.113.1"))
+        bad_pkt[0] = 0x42  # version 4, ihl=2 (8 bytes < 20)
+        self.assertIsNone(self.guard.parse_icmp_packet(bytes(bad_pkt)))
+
+        # Continuous suppressed events must not extend cooldown past initial t=100 + 15s
+        ev1 = IcmpRedirectEvent("198.51.100.5", "198.51.100.99", "203.0.113.1", timestamp=100.0)
+        self.guard._record_event(ev1)
+        self.assertEqual(len(self.guard.get_threat_strings()), 1)
+        for ts in (106.0, 112.0, 114.5):
+            self.guard._record_event(IcmpRedirectEvent("198.51.100.5", "198.51.100.99", "203.0.113.1", timestamp=ts))
+        self.assertEqual(len(self.guard.get_threat_strings()), 0)
+        # At t=115.5 (15.5s after initial emit at 100.0), cooldown expires and emits again
+        ev_after = IcmpRedirectEvent("198.51.100.5", "198.51.100.99", "203.0.113.1", timestamp=115.5)
+        self.guard._record_event(ev_after)
+        threats = self.guard.get_threat_strings()
+        self.assertEqual(len(threats), 1)
+        self.assertGreaterEqual(ev_after.burst_count, 4)
+
 
 if __name__ == "__main__":
     unittest.main()

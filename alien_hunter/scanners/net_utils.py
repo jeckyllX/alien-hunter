@@ -161,8 +161,16 @@ def create_udp_socket(
     return sock
 
 
-def get_subnet_broadcast(ip_or_base: Optional[str]) -> Optional[str]:
-    """Calculates standard /24 subnet broadcast address from IP or base (e.g. 192.168.1)."""
+def get_subnet_broadcast(ip_or_base: Optional[str], subnet_cidr: Optional[str] = None) -> Optional[str]:
+    """Calculates subnet broadcast address from CIDR if provided, or falls back to /24."""
+    if subnet_cidr:
+        try:
+            import ipaddress
+            net = ipaddress.ip_network(subnet_cidr, strict=False)
+            if net.version == 4:
+                return str(net.broadcast_address)
+        except ValueError:
+            pass
     if not ip_or_base:
         return None
     parts = ip_or_base.strip().split(".")

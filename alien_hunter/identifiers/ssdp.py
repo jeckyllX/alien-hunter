@@ -58,7 +58,7 @@ class SsdpParser:
         target = headers.get("st") or headers.get("nt") or ""
         location = headers.get("location", "")
 
-        mgr = sig_manager or SignatureManager()
+        mgr = sig_manager or SignatureManager.get_instance()
         match: Optional[DeviceFingerprintMatch] = mgr.match_ssdp(server=server, target=target)
 
         services = [target] if target else []
@@ -95,7 +95,7 @@ class SsdpListener:
         sig_manager: Optional[SignatureManager] = None,
     ):
         self.interface_ip = interface_ip
-        self.sig_manager = sig_manager or SignatureManager()
+        self.sig_manager = sig_manager or SignatureManager.get_instance()
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -107,6 +107,7 @@ class SsdpListener:
             if self._running:
                 return True
 
+            sock = None
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -120,21 +121,14 @@ class SsdpListener:
 
                 sock.bind(("", self.SSDP_PORT))
 
-                # Join 239.255.255.250 multicast group
-                if self.interface_ip:
-                    mreq = struct.pack(
-                        "4s4s",
-                        socket.inet_aton(self.SSDP_MULTICAST_ADDR),
-                        socket.inet_aton(self.interface_ip),
-                    )
-                else:
-                    mreq = struct.pack(
-                        "4sl",
-                        socket.inet_aton(self.SSDP_MULTICAST_ADDR),
-                        socket.INADDR_ANY,
-                    )
+                # Join 239.255.255.250 multicast group using portable 4s4s packing
+                mreq = struct.pack(
+                    "4s4s",
+                    socket.inet_aton(self.SSDP_MULTICAST_ADDR),
+                    socket.inet_aton(self.interface_ip or "0.0.0.0"),
+                )
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-                sock.settimeout(1.0)
+                sock.settimeout(0.25)
                 self._sock = sock
                 self._running = True
 
@@ -144,48 +138,66 @@ class SsdpListener:
                 self._thread.start()
                 return True
             except Exception:
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
+                self._sock = None
+                self._running = False
+                return False
+
+    def stop(self):
+        """Stops the SSDP listener cleanly."""
+        with self._lock:
+            self._running = False
+            thread = self._thread
+
+        if thread and thread.is_alive():
+            thread.join(timeout=2.0)
+
+        if not thread or not thread.is_alive():
+            with self._lock:
                 if self._sock:
                     try:
                         self._sock.close()
                     except Exception:
                         pass
                     self._sock = None
-                return False
-
-    def stop(self):
-        """Stops the SSDP listener."""
-        with self._lock:
-            self._running = False
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
-        if self._sock:
-            try:
-                self._sock.close()
-            except Exception:
-                pass
-            self._sock = None
 
     def is_running(self) -> bool:
         return self._running
 
     def _listen_loop(self):
-        while self._running:
-            try:
-                if not self._sock:
+        try:
+            while self._running:
+                with self._lock:
+                    sock = self._sock
+                if not sock:
                     break
-                data, addr = self._sock.recvfrom(4096)
-                if data and addr:
-                    SsdpParser.process_payload(
-                        data=data,
-                        src_ip=addr[0],
-                        sig_manager=self.sig_manager,
-                    )
-            except socket.timeout:
-                continue
-            except Exception:
-                if not self._running:
-                    break
-                time.sleep(0.1)
+                try:
+                    data, addr = sock.recvfrom(4096)
+                    if data and addr:
+                        SsdpParser.process_payload(
+                            data=data,
+                            src_ip=addr[0],
+                            sig_manager=self.sig_manager,
+                        )
+                except socket.timeout:
+                    continue
+                except Exception:
+                    if not self._running:
+                        break
+                    time.sleep(0.1)
+        finally:
+            with self._lock:
+                self._running = False
+                if self._sock:
+                    try:
+                        self._sock.close()
+                    except Exception:
+                        pass
+                    self._sock = None
 
     def sniff(self, duration: float = 2.0) -> List[Dict[str, Any]]:
         """Synchronously captures SSDP packets over a given duration."""
@@ -200,9 +212,13 @@ class SsdpListener:
                 except Exception:
                     pass
             sock.bind(("", self.SSDP_PORT))
-            mreq = struct.pack("4sl", socket.inet_aton(self.SSDP_MULTICAST_ADDR), socket.INADDR_ANY)
+            mreq = struct.pack(
+                "4s4s",
+                socket.inet_aton(self.SSDP_MULTICAST_ADDR),
+                socket.inet_aton(self.interface_ip or "0.0.0.0"),
+            )
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-            sock.settimeout(0.5)
+            sock.settimeout(0.25)
 
             start = time.time()
             while time.time() - start < duration:

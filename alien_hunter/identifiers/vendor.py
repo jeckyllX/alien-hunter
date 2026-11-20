@@ -4,10 +4,15 @@ Determines manufacturer identity, country of registration, IEEE block types,
 and detects locally administered (randomized) private MAC addresses.
 """
 
+import collections
 import json
+import threading
+import urllib.parse
 import urllib.request
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Optional
 from dataclasses import dataclass
+
+from ..http_utils import safe_urlopen, read_bounded
 
 # ============================================================================
 # Configuration Constants
@@ -61,13 +66,16 @@ class MacVendorResolver:
         api_url: str = DEFAULT_MAC_API_URL,
         timeout: float = DEFAULT_HTTP_TIMEOUT,
         user_agent: str = DEFAULT_USER_AGENT,
+        max_cache_size: int = 4096,
     ):
         self.api_url = api_url
         self.timeout = timeout
         self.user_agent = user_agent
-        # Cache to prevent redundant HTTP queries for the same MAC
-        self._cache: Dict[str, Tuple[str, bool]] = {}
-        self._info_cache: Dict[str, MacVendorInfo] = {}
+        self._max_cache_size = max(1, max_cache_size)
+        self._lock = threading.Lock()
+        # Bounded cache to prevent redundant HTTP queries for the same MAC
+        self._cache: "collections.OrderedDict[str, Tuple[str, bool]]" = collections.OrderedDict()
+        self._info_cache: "collections.OrderedDict[str, MacVendorInfo]" = collections.OrderedDict()
 
     @staticmethod
     def is_randomized_mac(mac: str) -> bool:
@@ -76,13 +84,31 @@ class MacVendorResolver:
         Modern iOS, Android, and Windows devices set this bit when randomizing their MAC.
         Example: b6:be:e4:... -> b6 in binary is 10110110 (bit 1 is 1 -> True).
         """
-        if not mac or ":" not in mac:
+        if not mac:
+            return False
+        norm = mac.strip().replace("-", ":")
+        if ":" not in norm:
             return False
         try:
-            first_byte = int(mac.split(":")[0], 16)
+            first_byte = int(norm.split(":", 1)[0], 16)
             return bool(first_byte & 0x02)
         except Exception:
             return False
+
+    def _store_cache(self, mac_upper: str, info: MacVendorInfo) -> None:
+        """Stores a resolved MAC vendor entry with bounded LRU eviction."""
+        with self._lock:
+            if mac_upper in self._info_cache:
+                self._info_cache.move_to_end(mac_upper)
+            elif len(self._info_cache) >= self._max_cache_size:
+                self._info_cache.popitem(last=False)
+            self._info_cache[mac_upper] = info
+
+            if mac_upper in self._cache:
+                self._cache.move_to_end(mac_upper)
+            elif len(self._cache) >= self._max_cache_size:
+                self._cache.popitem(last=False)
+            self._cache[mac_upper] = (info.display_str, info.is_randomized)
 
     def resolve_details(self, mac: str) -> MacVendorInfo:
         """
@@ -92,9 +118,12 @@ class MacVendorResolver:
         if not mac or mac in ("LOCAL", "N/A"):
             return MacVendorInfo(company="N/A", is_randomized=False)
 
-        mac_upper = mac.upper()
-        if mac_upper in self._info_cache:
-            return self._info_cache[mac_upper]
+        mac_upper = mac.strip().upper().replace("-", ":")
+        with self._lock:
+            cached = self._info_cache.get(mac_upper)
+            if cached is not None:
+                self._info_cache.move_to_end(mac_upper)
+                return cached
 
         is_rand = self.is_randomized_mac(mac_upper)
         info = MacVendorInfo(
@@ -102,32 +131,46 @@ class MacVendorResolver:
             is_randomized=is_rand,
         )
 
-        try:
-            url = self.api_url.format(mac=mac_upper)
-            req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                company = data.get("company")
-                country = data.get("country")
-                block_type = data.get("blockType")
-                prefix = data.get("macPrefix")
-                api_rand = data.get("isRand", False) or data.get("isPrivate", False)
+        # Skip external HTTP calls for randomized MACs to avoid leaking local client identifiers
+        if is_rand:
+            self._store_cache(mac_upper, info)
+            return info
 
-                if company:
-                    info.company = company
-                if country:
-                    info.country = country
-                if block_type:
-                    info.block_type = block_type
-                if prefix:
-                    info.prefix = prefix
-                if api_rand:
-                    info.is_randomized = True
+        lookup_success = False
+        try:
+            encoded_mac = urllib.parse.quote(mac_upper, safe="")
+            url = self.api_url.format(mac=encoded_mac)
+            req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+            with safe_urlopen(
+                req, timeout=self.timeout, allowed_schemes=("https", "http"), allow_redirects=False
+            ) as resp:
+                status = getattr(resp, "status", 200)
+                if status == 200:
+                    data = json.loads(read_bounded(resp, 65536).decode("utf-8"))
+                    if isinstance(data, dict):
+                        company = data.get("company")
+                        country = data.get("country")
+                        block_type = data.get("blockType")
+                        prefix = data.get("macPrefix")
+                        api_rand = data.get("isRand", False) or data.get("isPrivate", False)
+
+                        if company:
+                            info.company = company
+                        if country:
+                            info.country = country
+                        if block_type:
+                            info.block_type = block_type
+                        if prefix:
+                            info.prefix = prefix
+                        if api_rand:
+                            info.is_randomized = True
+                        lookup_success = True
         except Exception:
             pass
 
-        self._info_cache[mac_upper] = info
-        self._cache[mac_upper] = (info.display_str, info.is_randomized)
+        # Only cache authoritative HTTP 200 responses so transient failures can retry later
+        if lookup_success:
+            self._store_cache(mac_upper, info)
         return info
 
     def resolve(self, mac: str) -> Tuple[str, bool]:
@@ -138,9 +181,12 @@ class MacVendorResolver:
         if not mac or mac in ("LOCAL", "N/A"):
             return "N/A", False
 
-        mac_upper = mac.upper()
-        if mac_upper in self._cache:
-            return self._cache[mac_upper]
+        mac_upper = mac.strip().upper().replace("-", ":")
+        with self._lock:
+            cached = self._cache.get(mac_upper)
+            if cached is not None:
+                self._cache.move_to_end(mac_upper)
+                return cached
 
         info = self.resolve_details(mac_upper)
         return info.display_str, info.is_randomized

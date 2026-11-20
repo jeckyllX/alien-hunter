@@ -400,6 +400,51 @@ class TestPortScannerBanner(unittest.TestCase):
         self.assertTrue(any("Banner (22/SSH): SSH-2.0-OpenSSH_8.9p1" in n for n in notes))
 
 
+class TestHttpUtilsAndScannerSafety(unittest.TestCase):
+    """Regression tests for SSRF protection, secret redaction, and DNS recursion safety."""
+
+    def test_validate_http_url_ssrf_and_peer_ip(self):
+        from alien_hunter.http_utils import validate_http_url, redact_url_secrets
+
+        with self.assertRaises(ValueError):
+            validate_http_url("file:///etc/passwd")
+        with self.assertRaises(ValueError):
+            validate_http_url("http://169.254.169.254/latest/meta-data", reject_loopback_and_metadata=True)
+        with self.assertRaises(ValueError):
+            validate_http_url("http://127.0.0.1:8080/", reject_loopback_and_metadata=True)
+        with self.assertRaises(ValueError):
+            validate_http_url("http://198.51.100.20:1900/desc.xml", expected_host_ip="198.51.100.99")
+
+        parsed = validate_http_url(
+            "http://198.51.100.20:1900/desc.xml",
+            expected_host_ip="198.51.100.20",
+            reject_loopback_and_metadata=True,
+        )
+        self.assertEqual(parsed.hostname, "198.51.100.20")
+
+        self.assertIn("bot***", redact_url_secrets("https://api.telegram.org/bot12345:SECRET/sendMessage"))
+        self.assertIn("key=***", redact_url_secrets("https://example.invalid/v1?key=SECRET123"))
+        self.assertIn("/api/webhooks/99/***", redact_url_secrets("https://discord.com/api/webhooks/99/SECRETTOK"))
+        self.assertIn("/services/A/B/***", redact_url_secrets("https://hooks.slack.com/services/A/B/SECRET"))
+
+    @patch("urllib.request.urlopen")
+    def test_ssdp_fetch_description_rejects_mismatched_host_ip(self, mock_urlopen):
+        res = SsdpScanner._fetch_device_descriptor(
+            "http://198.51.100.99:8080/desc.xml", expected_ip="198.51.100.20"
+        )
+        self.assertIsNone(res)
+        mock_urlopen.assert_not_called()
+
+    def test_router_parse_dns_name_handles_cyclic_compression_pointer(self):
+        from alien_hunter.scanners.router import RouterDnsAuditor
+
+        # Self-referencing compression pointer at offset 0 pointing to offset 0
+        cyclic = b"\xc0\x00\x00"
+        name, next_off = RouterDnsAuditor.parse_dns_name(cyclic, 0)
+        self.assertEqual(name, "")
+        self.assertEqual(next_off, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
 

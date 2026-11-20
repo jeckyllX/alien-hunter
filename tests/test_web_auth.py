@@ -492,6 +492,98 @@ class TestWebServerAuthenticationEndpoints(unittest.TestCase):
             finally:
                 srv2.stop()
 
+    def test_fail2ban_log_sanitization(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_file = os.path.join(tmpdir, "auth.log")
+            auth = WebAuthenticator(
+                {"enabled": True, "username": "admin", "password_hash": PasswordHasher.hash_password("Pass123!")},
+                auth_log_path=log_file,
+            )
+            auth.log_auth_failure('bad"\n[AUTH_FAILURE] user="root', "203.0.113.5\r\nfake", reason='bad"reason')
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            self.assertEqual(len(lines), 1)
+            self.assertNotIn('user="root', lines[0])
+
+    def test_rate_limiter_recovers_after_backoff_expiry(self):
+        from unittest.mock import patch
+
+        limiter = AuthRateLimiter(max_attempts=2, window_seconds=5, base_delay_seconds=2.0, max_lockout_seconds=30.0)
+        clock = [100.0]
+        with patch("alien_hunter.web.auth.time.time", side_effect=lambda: clock[0]):
+            limiter.record_failure("198.51.100.10")
+            clock[0] = 101.0
+            limiter.record_failure("198.51.100.10")
+            clock[0] = 101.5
+            allowed, _ = limiter.check_allowed("198.51.100.10")
+            self.assertFalse(allowed)
+            # After backoff and sliding window expire, further checks must recover cleanly
+            clock[0] = 115.0
+            allowed_after, _ = limiter.check_allowed("198.51.100.10")
+            self.assertTrue(allowed_after)
+            clock[0] = 115.1
+            limiter.record_failure("198.51.100.10")
+            clock[0] = 115.2
+            allowed_single, _ = limiter.check_allowed("198.51.100.10")
+            self.assertTrue(allowed_single)
+
+    def test_session_manager_tolerates_corrupt_single_entry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = os.path.join(tmpdir, "sessions.json")
+            now = time.time()
+            with open(session_file, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        SessionManager._hash_token("validtoken"): {
+                            "username": "admin",
+                            "created": now,
+                            "expires": now + 600,
+                        },
+                        "badtoken": {"username": "admin", "expires": "not-a-float"},
+                    },
+                    f,
+                )
+            mgr = SessionManager(session_file=session_file)
+            self.assertEqual(mgr.validate_session("validtoken"), "admin")
+            self.assertIsNone(mgr.validate_session("badtoken"))
+
+    def test_login_non_dict_json_password_whitespace_head_auth_and_xff(self):
+        # 1. HEAD /api/devices requires authentication
+        head_req = Request(f"{self.base_url}/api/devices", headers={"User-Agent": "Mozilla/5.0"}, method="HEAD")
+        with self.assertRaises(HTTPError) as ctx:
+            urlopen(head_req, timeout=3)
+        self.assertEqual(ctx.exception.code, 401)
+
+        # 2. Non-dict JSON body rejected with 400
+        req_list = Request(
+            f"{self.base_url}/api/auth/login",
+            data=b'["admin"]',
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as ctx_bad:
+            urlopen(req_list, timeout=3)
+        self.assertEqual(ctx_bad.exception.code, 400)
+
+        # 3. Trailing space in wrong password is not stripped (fails auth)
+        req_ws = Request(
+            f"{self.base_url}/api/auth/login",
+            data=json.dumps({"username": "admin", "password": self.password + " "}).encode("utf-8"),
+            headers={"User-Agent": "Mozilla/5.0", "Content-Type": "application/json", "X-Forwarded-For": "198.51.100.77, 198.51.100.88"},
+            method="POST",
+        )
+        with self.assertRaises(HTTPError) as ctx_ws:
+            urlopen(req_ws, timeout=3)
+        self.assertEqual(ctx_ws.exception.code, 401)
+
+        # 4. _get_client_ip picks rightmost non-loopback valid IP from X-Forwarded-For
+        from alien_hunter.web.server import SentinelHTTPHandler
+        fake_handler = SimpleNamespace(
+            client_address=("127.0.0.1", 12345),
+            headers={"X-Forwarded-For": "192.0.2.1, 198.51.100.55, 127.0.0.1"},
+        )
+        self.assertEqual(SentinelHTTPHandler._get_client_ip(fake_handler), "198.51.100.55")
+
 
 if __name__ == "__main__":
     unittest.main()

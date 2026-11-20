@@ -88,6 +88,9 @@ class ArpPoisonGuard:
     PACKET_MR_PROMISC = 1
 
     ETH_P_ARP = 0x0806
+    MAX_GARP_TRACKED_MACS = 1024
+    MAX_GARP_TIMESTAMPS_PER_MAC = 128
+    MAX_ALERT_COOLDOWN_KEYS = 2048
 
     def __init__(
         self,
@@ -118,8 +121,8 @@ class ArpPoisonGuard:
             ArpSelfHealing(interface=self.interface) if self_healing_enabled else None
         )
 
-        # Gratuitous ARP tracking: sender_mac -> list of timestamps
-        self._garp_history: Dict[str, collections.deque] = collections.defaultdict(collections.deque)
+        # Gratuitous ARP tracking: sender_mac -> bounded deque of timestamps
+        self._garp_history: "collections.OrderedDict[str, collections.deque]" = collections.OrderedDict()
         # Alert cooldown tracking: (threat_type, spoofed_ip, attacker_mac) -> timestamp
         self._last_alert_times: Dict[Tuple[str, str, str], float] = {}
 
@@ -194,6 +197,21 @@ class ArpPoisonGuard:
             "is_garp": is_garp,
         }
 
+    def _check_and_update_cooldown(self, key: Tuple[str, str, str], now: float) -> bool:
+        """Checks alert cooldown and bounds stored cooldown keys."""
+        last_ts = self._last_alert_times.get(key, 0.0)
+        if last_ts > 0.0 and now - last_ts < self.alert_cooldown:
+            return False
+        if key not in self._last_alert_times and len(self._last_alert_times) >= self.MAX_ALERT_COOLDOWN_KEYS:
+            expired = [k for k, ts in self._last_alert_times.items() if now - ts >= self.alert_cooldown]
+            for ek in expired:
+                del self._last_alert_times[ek]
+            if len(self._last_alert_times) >= self.MAX_ALERT_COOLDOWN_KEYS:
+                oldest = min(self._last_alert_times, key=self._last_alert_times.__getitem__)
+                self._last_alert_times.pop(oldest, None)
+        self._last_alert_times[key] = now
+        return True
+
     def process_packet(self, pkt: bytes, now: Optional[float] = None) -> Optional[ArpPoisonEvent]:
         """
         Processes a raw Ethernet frame. Returns an ArpPoisonEvent if active
@@ -210,42 +228,35 @@ class ArpPoisonGuard:
         eth_src = parsed["eth_src_mac"].upper()
         sender_mac = parsed["sender_mac"].upper()
         sender_ip = parsed["sender_ip"]
-        target_ip = parsed["target_ip"]
         op = parsed["op"]
         is_garp = parsed["is_garp"]
 
+        heal_args: Optional[Tuple[str, str, str, str]] = None
+        healer: Optional[ArpSelfHealing] = None
+        event: Optional[ArpPoisonEvent] = None
+
         with self._lock:
+            healer = self.healer
             # 1. Gateway Poisoning: sender_ip is gateway_ip but sender_mac != gateway_mac
-            if self.gateway_ip and self.gateway_mac:
-                if sender_ip == self.gateway_ip and sender_mac != self.gateway_mac:
-                    if self.healer:
-                        self.healer.heal(
-                            spoofed_ip=sender_ip,
-                            legitimate_mac=self.gateway_mac,
-                            attacker_mac=sender_mac,
-                            threat_type="GATEWAY_POISONING",
-                            now=now,
-                        )
-                    key = ("GATEWAY_POISONING", sender_ip, sender_mac)
-                    if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
-                        self._last_alert_times[key] = now
-                        event = ArpPoisonEvent(
-                            threat_type="GATEWAY_POISONING",
-                            spoofed_ip=sender_ip,
-                            attacker_mac=sender_mac,
-                            expected_mac=self.gateway_mac,
-                            eth_src_mac=eth_src,
-                            timestamp=now,
-                        )
-                        self._detected_events.append(event)
-                        return event
+            if self.gateway_ip and self.gateway_mac and sender_ip == self.gateway_ip and sender_mac != self.gateway_mac:
+                if healer:
+                    heal_args = (sender_ip, self.gateway_mac, sender_mac, "GATEWAY_POISONING")
+                key = ("GATEWAY_POISONING", sender_ip, sender_mac)
+                if self._check_and_update_cooldown(key, now):
+                    event = ArpPoisonEvent(
+                        threat_type="GATEWAY_POISONING",
+                        spoofed_ip=sender_ip,
+                        attacker_mac=sender_mac,
+                        expected_mac=self.gateway_mac,
+                        eth_src_mac=eth_src,
+                        timestamp=now,
+                    )
+                    self._detected_events.append(event)
 
             # 2. Layer-2 Forgery: Ethernet source MAC differs from ARP payload sender MAC
-            # (Excludes broadcast or zeroed source MACs)
-            if eth_src != sender_mac and eth_src != "00:00:00:00:00:00":
+            elif eth_src != sender_mac and eth_src != "00:00:00:00:00:00":
                 key = ("L2_MAC_MISMATCH", sender_ip, sender_mac)
-                if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
-                    self._last_alert_times[key] = now
+                if self._check_and_update_cooldown(key, now):
                     event = ArpPoisonEvent(
                         threat_type="L2_MAC_MISMATCH",
                         spoofed_ip=sender_ip,
@@ -255,37 +266,43 @@ class ArpPoisonGuard:
                         timestamp=now,
                     )
                     self._detected_events.append(event)
-                    return event
 
             # 3. Known Whitelist Device Hijack: an ARP reply changes an existing trusted IP's MAC
-            if op == 2 and sender_ip in self.trusted_ip_mac_map:
+            elif op == 2 and sender_ip in self.trusted_ip_mac_map and self.trusted_ip_mac_map[sender_ip] and sender_mac != self.trusted_ip_mac_map[sender_ip]:
                 expected = self.trusted_ip_mac_map[sender_ip]
-                if expected and sender_mac != expected:
-                    if self.healer:
-                        self.healer.heal(
-                            spoofed_ip=sender_ip,
-                            legitimate_mac=expected,
-                            attacker_mac=sender_mac,
-                            threat_type="IP_MAC_FLIP",
-                            now=now,
-                        )
-                    key = ("IP_MAC_FLIP", sender_ip, sender_mac)
-                    if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
-                        self._last_alert_times[key] = now
-                        event = ArpPoisonEvent(
-                            threat_type="IP_MAC_FLIP",
-                            spoofed_ip=sender_ip,
-                            attacker_mac=sender_mac,
-                            expected_mac=expected,
-                            eth_src_mac=eth_src,
-                            timestamp=now,
-                        )
-                        self._detected_events.append(event)
-                        return event
+                if healer:
+                    heal_args = (sender_ip, expected, sender_mac, "IP_MAC_FLIP")
+                key = ("IP_MAC_FLIP", sender_ip, sender_mac)
+                if self._check_and_update_cooldown(key, now):
+                    event = ArpPoisonEvent(
+                        threat_type="IP_MAC_FLIP",
+                        spoofed_ip=sender_ip,
+                        attacker_mac=sender_mac,
+                        expected_mac=expected,
+                        eth_src_mac=eth_src,
+                        timestamp=now,
+                    )
+                    self._detected_events.append(event)
 
             # 4. Gratuitous ARP Reply Flood
-            if is_garp and op == 2:
-                q = self._garp_history[sender_mac]
+            elif is_garp and op == 2:
+                if sender_mac in self._garp_history:
+                    q = self._garp_history[sender_mac]
+                    self._garp_history.move_to_end(sender_mac)
+                else:
+                    if len(self._garp_history) >= self.MAX_GARP_TRACKED_MACS:
+                        cutoff_prune = now - self.garp_window_seconds
+                        stale_macs = [
+                            m for m, dq in self._garp_history.items()
+                            if not dq or dq[-1] < cutoff_prune
+                        ]
+                        for sm in stale_macs:
+                            del self._garp_history[sm]
+                        if len(self._garp_history) >= self.MAX_GARP_TRACKED_MACS:
+                            self._garp_history.popitem(last=False)
+                    q = collections.deque(maxlen=self.MAX_GARP_TIMESTAMPS_PER_MAC)
+                    self._garp_history[sender_mac] = q
+
                 q.append(now)
                 cutoff = now - self.garp_window_seconds
                 while q and q[0] < cutoff:
@@ -293,8 +310,7 @@ class ArpPoisonGuard:
 
                 if len(q) >= self.garp_burst_threshold:
                     key = ("GARP_FLOOD", sender_ip, sender_mac)
-                    if now - self._last_alert_times.get(key, 0.0) >= self.alert_cooldown:
-                        self._last_alert_times[key] = now
+                    if self._check_and_update_cooldown(key, now):
                         event = ArpPoisonEvent(
                             threat_type="GARP_FLOOD",
                             spoofed_ip=sender_ip,
@@ -305,9 +321,18 @@ class ArpPoisonGuard:
                             burst_count=len(q),
                         )
                         self._detected_events.append(event)
-                        return event
 
-        return None
+        if heal_args and healer:
+            spoofed_ip, legitimate_mac, atk_mac, ttype = heal_args
+            healer.heal(
+                spoofed_ip=spoofed_ip,
+                legitimate_mac=legitimate_mac,
+                attacker_mac=atk_mac,
+                threat_type=ttype,
+                now=now,
+            )
+
+        return event
 
     def sniff(self, duration: float = 1.0) -> List[ArpPoisonEvent]:
         """
@@ -329,11 +354,13 @@ class ArpPoisonGuard:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(0.5)
+            raw_sock.settimeout(0.25)
             start_time = time.time()
             while time.time() - start_time < duration:
                 try:
-                    pkt, _ = raw_sock.recvfrom(2048)
+                    pkt, addr = raw_sock.recvfrom(2048)
+                    if isinstance(addr, tuple) and len(addr) >= 3 and addr[2] in (4, 5):
+                        continue
                     ev = self.process_packet(pkt)
                     if ev:
                         events.append(ev)
@@ -378,7 +405,7 @@ class ArpPoisonGuard:
         """Stops the background listener thread."""
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
 
     @property
     def is_running(self) -> bool:
@@ -400,10 +427,12 @@ class ArpPoisonGuard:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(1.0)
+            raw_sock.settimeout(0.25)
             while self._running:
                 try:
-                    pkt, _ = raw_sock.recvfrom(2048)
+                    pkt, addr = raw_sock.recvfrom(2048)
+                    if isinstance(addr, tuple) and len(addr) >= 3 and addr[2] in (4, 5):
+                        continue
                     self.process_packet(pkt)
                 except socket.timeout:
                     continue
@@ -412,6 +441,7 @@ class ArpPoisonGuard:
         except Exception:
             pass
         finally:
+            self._running = False
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,

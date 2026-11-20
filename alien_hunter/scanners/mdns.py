@@ -92,6 +92,7 @@ class MdnsScanner:
             # Check for compression pointer (top 2 bits set: 0xC0)
             if (length & 0xC0) == 0xC0:
                 if offset + 1 >= len(data):
+                    next_offset = len(data)
                     break
                 pointer = struct.unpack("!H", data[offset : offset + 2])[0] & 0x3FFF
                 if not jumped:
@@ -104,6 +105,7 @@ class MdnsScanner:
             else:
                 offset += 1
                 if offset + length > len(data):
+                    next_offset = len(data)
                     break
                 try:
                     label = data[offset : offset + length].decode("utf-8", errors="replace")

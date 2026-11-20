@@ -113,7 +113,7 @@ class TestConfigManager(unittest.TestCase):
     def test_sync_device_inventory_skips_offline_devices(self):
         initial_whitelist = {
             "02:00:00:00:00:50": {
-                "name": "Test Laptop",
+                "name": "Test Workstation",
                 "owner": "User",
                 "primary_ip": "192.0.2.50",
                 "last_seen": "2026-09-20T10:00:00Z",
@@ -130,13 +130,56 @@ class TestConfigManager(unittest.TestCase):
         success = self.config_mgr.sync_device_inventory(
             devices=[dev_offline],
             custom_path=self.whitelist_file,
-            subnet_cidr="192.168.1.0/24",
+            subnet_cidr="192.0.2.0/24",
         )
         self.assertTrue(success)
 
         reloaded = self.config_mgr.load_whitelist(self.whitelist_file)
         # last_seen timestamp must not have been modified for offline host
         self.assertEqual(reloaded["02:00:00:00:00:50"]["last_seen"], "2026-09-20T10:00:00Z")
+
+    def test_load_json_strict_raises_on_corrupt_and_non_dict(self):
+        bad_path = os.path.join(self.temp_dir.name, "bad.json")
+        with open(bad_path, "w", encoding="utf-8") as f:
+            f.write("{corrupt json")
+        with self.assertRaises(ValueError):
+            self.config_mgr.load_json(bad_path, strict=True)
+
+        list_path = os.path.join(self.temp_dir.name, "list.json")
+        with open(list_path, "w", encoding="utf-8") as f:
+            f.write('["not-a-dict"]')
+        with self.assertRaises(ValueError):
+            self.config_mgr.load_whitelist(list_path, strict=True)
+
+    def test_sync_device_inventory_does_not_overwrite_existing_ports(self):
+        initial_whitelist = {
+            "02:00:00:00:00:10": {
+                "name": "Web Server",
+                "primary_ip": "198.51.100.10",
+                "ports": ["80/HTTP"],
+            }
+        }
+        self.config_mgr.save_whitelist(initial_whitelist, self.whitelist_file)
+        dev = SimpleNamespace(
+            mac="02:00:00:00:00:10",
+            ip="198.51.100.10",
+            aliases=[],
+            vendor="Generic Corp",
+            discovery_method="Layer-2 ARP Scan",
+            mdns_services=[],
+            open_ports=["80/HTTP", "23/Telnet"],
+        )
+        self.assertTrue(
+            self.config_mgr.sync_device_inventory([dev], custom_path=self.whitelist_file, subnet_cidr="198.51.100.0/24")
+        )
+        reloaded = self.config_mgr.load_whitelist(self.whitelist_file)
+        self.assertEqual(reloaded["02:00:00:00:00:10"]["ports"], ["80/HTTP"])
+
+    def test_save_config_enforces_0600_mode(self):
+        cfg_path = os.path.join(self.temp_dir.name, "config.json")
+        self.assertTrue(self.config_mgr.save_config({"web_auth": {"enabled": True}}, cfg_path))
+        mode = os.stat(cfg_path).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
 
 if __name__ == "__main__":

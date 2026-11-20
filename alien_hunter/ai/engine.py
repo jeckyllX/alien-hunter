@@ -3,8 +3,13 @@ AI Security Analysis Engine for Alien Hunter.
 Coordinates provider selection, MAC/port caching, and concurrent assessment execution.
 """
 
+import collections
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Any, Optional, Type
+import hashlib
+import json
+import threading
+import time
+from typing import Dict, List, Any, Optional, Tuple, Type
 
 from .base import BaseAIProvider
 from .models import DeviceRiskAssessment, NetworkPostureAssessment
@@ -36,7 +41,10 @@ class AIEngine:
         self.config = config or {}
         self.cache_enabled = bool(self.config.get("cache_results", True))
         self.analyze_on = str(self.config.get("analyze_on", "alien_only")).lower().strip()
-        self._cache: Dict[str, DeviceRiskAssessment] = {}
+        self._cache: "collections.OrderedDict[str, Tuple[float, DeviceRiskAssessment]]" = collections.OrderedDict()
+        self._cache_lock = threading.Lock()
+        self._max_cache_entries = 512
+        self._cache_ttl_seconds = float(self.config.get("cache_ttl_seconds", 3600.0))
         self.posture_gate = PostureGate(
             min_interval=float(self.config.get("posture_min_interval_seconds", 900)),
             max_age=float(self.config.get("posture_max_age_seconds", 86400)),
@@ -60,35 +68,81 @@ class AIEngine:
         if not provider_cls:
             return None
 
-        merged_cfg = dict(ai_cfg)
         providers_dict = ai_cfg.get("providers", {})
-        if isinstance(providers_dict, dict) and provider_name in providers_dict:
-            provider_profile = providers_dict[provider_name]
-            if isinstance(provider_profile, dict):
-                merged_cfg.update(provider_profile)
+        if (
+            isinstance(providers_dict, dict)
+            and provider_name in providers_dict
+            and isinstance(providers_dict[provider_name], dict)
+        ):
+            # Exclude top-level connection credentials so named profiles never inherit stale endpoint/key values
+            merged_cfg = {
+                k: v for k, v in ai_cfg.items() if k not in ("providers", "endpoint", "model", "api_key")
+            }
+            merged_cfg.update(providers_dict[provider_name])
+        else:
+            merged_cfg = {k: v for k, v in ai_cfg.items() if k != "providers"}
 
+        merged_cfg["provider"] = provider_name
         provider = provider_cls(merged_cfg)
         return cls(provider=provider, config=merged_cfg)
 
-    def _cache_key(self, device: Device) -> str:
+    def _cache_key(self, device: Device, threats: Optional[List[str]] = None) -> str:
         ports_str = ",".join(sorted(device.open_ports))
-        return f"{device.mac.upper()}::{ports_str}"
+        base_key = f"{device.mac.upper()}::{ports_str}"
+        vendor_val = device.vendor if device.vendor not in ("", "N/A") else ""
+        dev_threats = getattr(device, "threats", None) or []
+        dev_notes = getattr(device, "notes", None) or []
+        extra_threats = threats or []
+        if not (extra_threats or dev_threats or dev_notes or getattr(device, "is_alien", False) or vendor_val):
+            return base_key
+
+        ctx_payload = json.dumps(
+            {
+                "threats": sorted(str(t) for t in extra_threats + list(dev_threats)),
+                "notes": sorted(str(n) for n in dev_notes),
+                "is_alien": bool(getattr(device, "is_alien", False)),
+                "vendor": vendor_val,
+            },
+            sort_keys=True,
+        )
+        ctx_hash = hashlib.sha256(ctx_payload.encode("utf-8")).hexdigest()[:12]
+        return f"{base_key}::ctx={ctx_hash}"
 
     def analyze_device(self, device: Device, threats: List[str] = None) -> Optional[DeviceRiskAssessment]:
-        """Analyzes a single device, utilizing cached results when available."""
+        """Analyzes a single device, utilizing thread-safe bounded TTL cache when available."""
         if not device:
             return None
 
-        cache_key = self._cache_key(device)
-        if self.cache_enabled and cache_key in self._cache:
-            assessment = self._cache[cache_key]
-            device.ai_assessment = assessment
-            return assessment
+        cache_key = self._cache_key(device, threats)
+        now = time.time()
+        if self.cache_enabled:
+            with self._cache_lock:
+                entry = self._cache.get(cache_key)
+                if entry is not None:
+                    cached_at, assessment = entry
+                    if now - cached_at < self._cache_ttl_seconds:
+                        self._cache.move_to_end(cache_key)
+                        device.ai_assessment = assessment
+                        return assessment
+                    self._cache.pop(cache_key, None)
 
         assessment = self.provider.analyze(device, threats)
         if assessment:
             if self.cache_enabled:
-                self._cache[cache_key] = assessment
+                with self._cache_lock:
+                    if cache_key in self._cache:
+                        self._cache.move_to_end(cache_key)
+                    elif len(self._cache) >= self._max_cache_entries:
+                        expired_keys = [
+                            k
+                            for k, (ts, _) in self._cache.items()
+                            if now - ts >= self._cache_ttl_seconds
+                        ]
+                        for ek in expired_keys:
+                            del self._cache[ek]
+                        while len(self._cache) >= self._max_cache_entries:
+                            self._cache.popitem(last=False)
+                    self._cache[cache_key] = (now, assessment)
             device.ai_assessment = assessment
 
         return assessment

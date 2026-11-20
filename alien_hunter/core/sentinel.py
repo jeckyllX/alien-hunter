@@ -45,6 +45,7 @@ class SentinelWatchdog:
         self.config_mgr = config_mgr
         self.ai_engine = ai_engine
 
+        self.config_path = self.cfg.config_path
         self.whitelist_path = self.cfg.whitelist_path
         self.events_path = self.cfg.events_path
         self.custom_ports = self.cfg.custom_ports
@@ -69,6 +70,8 @@ class SentinelWatchdog:
 
         self.known_alien_macs: Set[str] = set()
         self.known_audit_threats: Set[str] = set()
+        self._pinned_gateway_ip: Optional[str] = None
+        self._pinned_gateway_mac: Optional[str] = None
         self.honey_listener: Optional[HoneyPortListener] = None
         self.syn_detector: Optional[SynScanDetector] = None
         self.dns_tunnel_detector: Optional[DnsTunnelingDetector] = None
@@ -95,19 +98,69 @@ class SentinelWatchdog:
             except Exception as e:
                 log.debug("Failed to initialize web state from whitelist: %s", e)
 
+    @staticmethod
+    def _is_guard_active(guard: Optional[Any]) -> bool:
+        if not guard:
+            return False
+        attr = getattr(guard, "is_running", None)
+        if callable(attr):
+            return bool(attr())
+        if attr is not None:
+            return bool(attr)
+        return bool(getattr(guard, "running", getattr(guard, "_running", True)))
+
+    def _resolve_authoritative_gateway_mac(
+        self,
+        gateway_ip: Optional[str],
+        fallback_mac: Optional[str],
+        whitelist: Optional[Dict[str, dict]] = None,
+    ) -> Optional[str]:
+        """Pins the gateway MAC from the whitelist or initial verified baseline."""
+        if not gateway_ip:
+            return None
+
+        if isinstance(whitelist, dict):
+            for w_mac, w_info in whitelist.items():
+                if not isinstance(w_info, dict) or not w_info.get("trusted", True):
+                    continue
+                if w_info.get("primary_ip") == gateway_ip and DiscoveryEngine._is_valid_hardware_mac(w_mac):
+                    self._pinned_gateway_ip = gateway_ip
+                    self._pinned_gateway_mac = w_mac.upper()
+                    return self._pinned_gateway_mac
+
+        if self._pinned_gateway_ip == gateway_ip and self._pinned_gateway_mac:
+            return self._pinned_gateway_mac
+
+        if fallback_mac and DiscoveryEngine._is_valid_hardware_mac(fallback_mac):
+            self._pinned_gateway_ip = gateway_ip
+            self._pinned_gateway_mac = fallback_mac.upper()
+            return self._pinned_gateway_mac
+
+        return None
+
+    @staticmethod
+    def _alien_identity_key(dev: Any) -> Optional[str]:
+        mac = getattr(dev, "mac", None)
+        if mac and DiscoveryEngine._is_valid_hardware_mac(mac):
+            return mac.upper()
+        ip = getattr(dev, "ip", None)
+        if ip:
+            return f"IP:{ip}"
+        return None
+
     def _active_defenses_dict(self) -> Dict[str, Any]:
         """Snapshot of currently active defense subsystems for the web dashboard."""
         return {
             "honey_ports": list(self.honey_listener.active_sockets.keys()) if self.honey_listener else [],
-            "syn_scan": bool(self.syn_detector),
-            "dns_tunneling": bool(self.dns_tunnel_detector),
-            "dhcp_starvation": bool(self.dhcp_guard),
-            "arp_poison": bool(self.arp_guard),
-            "arp_self_healing": bool(self.arp_guard and self.arp_guard.is_self_healing_enabled),
-            "icmp_redirect": bool(self.icmp_guard),
-            "rogue_dhcp": bool(self.rogue_dhcp_guard and self.rogue_dhcp_guard.is_running),
-            "storm_guard": bool(self.storm_guard and self.storm_guard.is_running),
-            "ssdp_harvester": bool(self.ssdp_listener and self.ssdp_listener.is_running()),
+            "syn_scan": self._is_guard_active(self.syn_detector),
+            "dns_tunneling": self._is_guard_active(self.dns_tunnel_detector),
+            "dhcp_starvation": self._is_guard_active(self.dhcp_guard),
+            "arp_poison": self._is_guard_active(self.arp_guard),
+            "arp_self_healing": bool(self._is_guard_active(self.arp_guard) and self.arp_guard.is_self_healing_enabled),
+            "icmp_redirect": self._is_guard_active(self.icmp_guard),
+            "rogue_dhcp": self._is_guard_active(self.rogue_dhcp_guard),
+            "storm_guard": self._is_guard_active(self.storm_guard),
+            "ssdp_harvester": self._is_guard_active(self.ssdp_listener),
         }
 
     def _drain_threats(self) -> Dict[str, List[str]]:
@@ -131,16 +184,15 @@ class SentinelWatchdog:
             for name, module in drainable
         }
 
-    def trigger_scan(self, deep: bool = True, ai: bool = True, analyze_all: bool = False) -> bool:
+    def trigger_scan(self, deep: bool = True, ai: bool = True, analyze_all: bool = False) -> int:
         """Signals the sentinel loop to immediately execute an on-demand audit."""
         with self._audit_lock:
             self._force_deep = deep
             self._force_ai = ai
             self._force_analyze_all = analyze_all
-            if self.web_state:
-                self.web_state.set_scanning(True)
+            scan_id = self.web_state.begin_triggered_scan() if self.web_state else 1
             self._scan_trigger.set()
-            return True
+            return scan_id
 
     def start(self):
         """Starts the sentinel polling loop."""
@@ -159,14 +211,24 @@ class SentinelWatchdog:
             except Exception as e:
                 log.debug("Failed to resolve network info at startup: %s", e)
 
-        if net_info and not self.interface:
+        if net_info and not self.interface and net_info.local_ip:
             self.interface = net_info.interface
 
         local_ip = net_info.local_ip if net_info else None
         local_mac = net_info.local_mac if net_info else None
         subnet_cidr = net_info.subnet_cidr if net_info else None
         gateway_ip = net_info.gateway_ip if net_info else None
-        gateway_mac = net_info.gateway_mac if net_info else None
+        startup_wl = {}
+        if self.whitelist_path:
+            try:
+                startup_wl = self.config_mgr.load_whitelist(self.whitelist_path)
+            except Exception:
+                startup_wl = {}
+        gateway_mac = self._resolve_authoritative_gateway_mac(
+            gateway_ip,
+            net_info.gateway_mac if net_info else None,
+            whitelist=startup_wl,
+        )
 
         if self.honey_ports:
             ignored_ips = {"127.0.0.1", "::1"}
@@ -176,6 +238,8 @@ class SentinelWatchdog:
             bound = self.honey_listener.start()
             if bound:
                 print(f"{Colors.GREEN}[+] Decoy Honey-Port Canary active on TCP ports: {', '.join(map(str, bound))}{Colors.RESET}")
+            else:
+                self.honey_listener = None
 
         if self.syn_scan_enabled:
             self.syn_detector = SynScanDetector(
@@ -186,6 +250,8 @@ class SentinelWatchdog:
             )
             if self.syn_detector.start():
                 print(f"{Colors.GREEN}[+] Stealth TCP SYN Scan Detector active.{Colors.RESET}")
+            else:
+                self.syn_detector = None
 
         if self.dns_tunneling_enabled:
             self.dns_tunnel_detector = DnsTunnelingDetector(
@@ -196,11 +262,15 @@ class SentinelWatchdog:
             )
             if self.dns_tunnel_detector.start():
                 print(f"{Colors.GREEN}[+] High-Entropy DNS Tunneling Detector active.{Colors.RESET}")
+            else:
+                self.dns_tunnel_detector = None
 
         if self.dhcp_starvation_enabled:
             self.dhcp_guard = DhcpStarvationGuard(interface=self.interface)
             if self.dhcp_guard.start():
                 print(f"{Colors.GREEN}[+] DHCP Starvation & Pool Exhaustion Guard active.{Colors.RESET}")
+            else:
+                self.dhcp_guard = None
 
         if self.arp_poison_enabled:
             self.arp_guard = ArpPoisonGuard(
@@ -211,6 +281,8 @@ class SentinelWatchdog:
             )
             if self.arp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ARP Poisoning Guard & Self-Healing IPS active.{Colors.RESET}")
+            else:
+                self.arp_guard = None
 
         if self.icmp_redirect_enabled:
             self.icmp_guard = IcmpRedirectGuard(
@@ -220,6 +292,8 @@ class SentinelWatchdog:
             )
             if self.icmp_guard.start():
                 print(f"{Colors.GREEN}[+] Real-Time ICMP Redirect Route Hijacking Guard active.{Colors.RESET}")
+            else:
+                self.icmp_guard = None
 
         if self.rogue_dhcp_enabled:
             self.rogue_dhcp_guard = RogueDhcpGuard(
@@ -229,6 +303,8 @@ class SentinelWatchdog:
             )
             if self.rogue_dhcp_guard.start():
                 print(f"{Colors.GREEN}[+] Rogue DHCP Server & Gateway Hijack Guard active.{Colors.RESET}")
+            else:
+                self.rogue_dhcp_guard = None
 
         if self.storm_guard_enabled:
             self.storm_guard = StormGuard(
@@ -239,10 +315,14 @@ class SentinelWatchdog:
             )
             if self.storm_guard.start():
                 print(f"{Colors.GREEN}[+] Switch CAM Flooding & Broadcast Storm Guard active.{Colors.RESET}")
+            else:
+                self.storm_guard = None
 
         self.ssdp_listener = SsdpListener(interface_ip=local_ip)
         if self.ssdp_listener.start():
             print(f"{Colors.GREEN}[+] SSDP / UPnP Device Harvester active.{Colors.RESET}")
+        else:
+            self.ssdp_listener = None
 
         if self.web_enabled:
             self.web_server = LightweightWebServer(
@@ -273,26 +353,36 @@ class SentinelWatchdog:
         try:
             while True:
                 try:
-                    # Check if an on-demand trigger requested a deep scan or AI
-                    deep_scan = self.deep_scan or self._force_deep
+                    # Atomically consume any triggered scan flags and snapshot scan generation ID
+                    with self._audit_lock:
+                        force_deep = self._force_deep
+                        force_ai = self._force_ai
+                        force_analyze_all = self._force_analyze_all
+                        self._force_deep = False
+                        self._force_ai = False
+                        self._force_analyze_all = False
+                        self._scan_trigger.clear()
+                        active_scan_id = self.web_state.scan_id if self.web_state else 0
+                        if self.web_state:
+                            self.web_state.set_scanning(True)
+
+                    deep_scan = self.deep_scan or force_deep
                     ai_engine = self.ai_engine
-                    if (self._force_ai or self._force_analyze_all) and not ai_engine:
+                    if (force_ai or force_analyze_all) and not ai_engine:
                         try:
                             from ..ai.engine import AIEngine
-                            config = self.config_mgr.load_config()
-                            ai_engine = AIEngine.from_config(config)
+                            config = self.config_mgr.load_config(self.config_path)
+                            config_copy = dict(config) if isinstance(config, dict) else {}
+                            ai_cfg = dict(config_copy.get("ai_analysis") or {}) if isinstance(config_copy.get("ai_analysis"), dict) else {}
+                            ai_cfg["enabled"] = True
+                            config_copy["ai_analysis"] = ai_cfg
+                            ai_engine = AIEngine.from_config(config_copy)
                         except Exception as e:
                             log.debug("On-demand AI engine initialization failed: %s", e)
 
                     original_analyze_on = ai_engine.analyze_on if ai_engine else None
-                    if ai_engine and self._force_analyze_all:
+                    if ai_engine and force_analyze_all:
                         ai_engine.analyze_on = "all_devices"
-
-                    self._force_deep = False
-                    self._force_ai = False
-                    self._force_analyze_all = False
-                    if self.web_state:
-                        self.web_state.set_scanning(True)
 
                     try:
                         # Reload whitelist dynamically in case user updated it
@@ -332,15 +422,25 @@ class SentinelWatchdog:
                             if result.network.local_mac:
                                 self.dns_tunnel_detector.local_mac = result.network.local_mac.upper()
 
+                        auth_gw_mac = self._resolve_authoritative_gateway_mac(
+                            result.network.gateway_ip,
+                            result.network.gateway_mac,
+                            whitelist=whitelist,
+                        )
                         if self.arp_guard:
                             trusted_map = {
                                 d.ip: d.mac
                                 for d in result.devices
-                                if d.mac and d.trusted and d.status in ("Online / Active", "Local Machine")
+                                if d.mac
+                                and DiscoveryEngine._is_valid_hardware_mac(d.mac)
+                                and d.trusted
+                                and d.status in ("Online / Active", "Local Machine")
                             }
+                            if result.network.gateway_ip and auth_gw_mac:
+                                trusted_map[result.network.gateway_ip] = auth_gw_mac
                             self.arp_guard.update_topology(
                                 gateway_ip=result.network.gateway_ip,
-                                gateway_mac=result.network.gateway_mac,
+                                gateway_mac=auth_gw_mac,
                                 trusted_ip_mac_map=trusted_map,
                             )
                         if self.icmp_guard:
@@ -351,7 +451,7 @@ class SentinelWatchdog:
                         if self.rogue_dhcp_guard:
                             self.rogue_dhcp_guard.update_topology(
                                 gateway_ip=result.network.gateway_ip,
-                                gateway_mac=result.network.gateway_mac,
+                                gateway_mac=auth_gw_mac,
                             )
                         if self.storm_guard and result.network and result.network.local_mac:
                             self.storm_guard.update_local_mac(result.network.local_mac)
@@ -380,11 +480,14 @@ class SentinelWatchdog:
                             network_info=result.network,
                             active_defenses=self._active_defenses_dict(),
                             ai_posture=result.ai_posture,
+                            completed_scan_id=active_scan_id,
                         )
 
-                    new_aliens = [
-                        a for a in result.alien_devices if a.mac and a.mac.upper() not in self.known_alien_macs
-                    ]
+                    new_aliens = []
+                    for a in result.alien_devices:
+                        akey = self._alien_identity_key(a)
+                        if akey and akey not in self.known_alien_macs:
+                            new_aliens.append(a)
 
                     has_live_threats = any(threat_groups.values()) or bool(new_audit_threats)
                     if new_aliens or has_live_threats:
@@ -397,7 +500,9 @@ class SentinelWatchdog:
                                 print(
                                     f"   {Colors.RED}• {a.ip:<15} {a.mac:<18} {a.vendor} ({a.display_name}){Colors.RESET}"
                                 )
-                                self.known_alien_macs.add(a.mac.upper())
+                                akey = self._alien_identity_key(a)
+                                if akey:
+                                    self.known_alien_macs.add(akey)
 
                         # Dispatch only new audit threats + live defense events to prevent repeated notifications
                         notify_threats = new_audit_threats + [
@@ -414,10 +519,12 @@ class SentinelWatchdog:
                             if failed_hooks:
                                 print(f"{Colors.YELLOW}[!] Alerts failed on: {', '.join(failed_hooks)}{Colors.RESET}")
 
-                    # Sync known threats and alien MACs so resolved issues can alert if they recur
+                    # Sync known threats and alien keys so resolved issues can alert if they recur
                     self.known_audit_threats = set(result.threats)
-                    current_alien_macs = {a.mac.upper() for a in result.alien_devices if a.mac}
-                    self.known_alien_macs = {m for m in self.known_alien_macs if m in current_alien_macs}
+                    current_alien_keys = {
+                        k for k in (self._alien_identity_key(a) for a in result.alien_devices) if k
+                    }
+                    self.known_alien_macs = {m for m in self.known_alien_macs if m in current_alien_keys}
 
                     self._scan_trigger.wait(self.interval)
                     self._scan_trigger.clear()

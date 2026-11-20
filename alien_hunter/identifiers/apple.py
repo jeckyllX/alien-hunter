@@ -6,6 +6,7 @@ their human-friendly names using Multicast DNS (Bonjour, RFC 6762) and DHCP clie
 
 import re
 import socket
+import struct
 import time
 from typing import Optional, Tuple
 from ..scanners.router import RouterDnsAuditor
@@ -81,23 +82,50 @@ class AppleDeviceIdentifier:
             s.sendto(query, (ip, MDNS_UDP_PORT))
 
             start = time.time()
-            while time.time() - start < self.mdns_timeout:
+            while True:
+                remaining = self.mdns_timeout - (time.time() - start)
+                if remaining <= 0:
+                    break
+                s.settimeout(remaining)
                 try:
                     data, addr = s.recvfrom(2048)
-                    if addr[0] == ip:
-                        # Parse DNS answer: skip 12-byte header, question section, and inspect PTR record
-                        p = 12
+                    if addr[0] != ip or len(data) < 12:
+                        continue
+
+                    _, flags, qdcount, ancount, _, _ = struct.unpack("!HHHHHH", data[:12])
+                    if not (flags & 0x8000) or ancount == 0:
+                        continue
+
+                    p = 12
+                    for _ in range(qdcount):
+                        if p >= len(data):
+                            break
                         _, p = RouterDnsAuditor.parse_dns_name(data, p)
                         p += 4  # skip QTYPE and QCLASS
-                        if p < len(data):
-                            _, p = RouterDnsAuditor.parse_dns_name(data, p)
-                            p += 8  # skip TYPE(2), CLASS(2), TTL(4)
-                            p += 2  # skip RDLENGTH(2)
+                        if p > len(data):
+                            break
+
+                    for _ in range(ancount):
+                        if p >= len(data):
+                            break
+                        _, p = RouterDnsAuditor.parse_dns_name(data, p)
+                        if p + 10 > len(data):
+                            break
+                        rtype, _, _, rdlen = struct.unpack("!HHIH", data[p : p + 10])
+                        p += 10
+                        if p + rdlen > len(data):
+                            break
+                        if rtype == 12:
                             rname, _ = RouterDnsAuditor.parse_dns_name(data, p)
                             if rname:
-                                # Strip trailing .local domain
-                                resolved_name = rname.replace(".local", "")
+                                resolved_name = (
+                                    rname[:-6] if rname.lower().endswith(".local") else rname
+                                )
                                 break
+                        p += rdlen
+
+                    if resolved_name:
+                        break
                 except socket.timeout:
                     break
         except Exception:

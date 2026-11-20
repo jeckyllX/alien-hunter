@@ -17,8 +17,8 @@ class AntiSniffDetector:
     """
 
     ETH_P_ARP = 0x0806
-    # Non-broadcast multicast MAC used to trigger kernel ARP response only on promiscuous NICs
-    PROMISCUOUS_PROBE_MAC = bytes.fromhex("01005E000001")
+    # Non-broadcast fake-broadcast MAC used to trigger kernel ARP replies only on promiscuous NICs
+    PROMISCUOUS_PROBE_MAC = bytes.fromhex("FFFFFFFFFFFE")
 
     @classmethod
     def check_promiscuous_hosts(
@@ -95,9 +95,17 @@ class AntiSniffDetector:
                         if eth_type != cls.ETH_P_ARP:
                             continue
 
+                        # Must be addressed to our probing host's MAC
+                        if raw_data[0:6] != src_mac_bytes:
+                            continue
+
                         arp_data = raw_data[14:42]
                         hw_type, proto_type, hlen, plen, opcode = struct.unpack("!HHBBH", arp_data[:8])
-                        if opcode != 2:  # Must be ARP Reply
+                        if hw_type != 1 or proto_type != 0x0800 or hlen != 6 or plen != 4 or opcode != 2:
+                            continue
+
+                        # ARP target IP must match our probe sender IP
+                        if arp_data[24:28] != src_ip_bytes:
                             continue
 
                         rep_sender_mac = ":".join(f"{b:02X}" for b in arp_data[8:14])

@@ -110,5 +110,81 @@ class TestDhcpFingerprintStore(unittest.TestCase):
         self.assertIsNotNone(self.store.get("00:11:22:33:44:05"))
 
 
+class TestIdentifierAndConsoleRegressions(unittest.TestCase):
+    """Regression tests for signature matching, fingerprint stores, vendor resolver, and console output."""
+
+    def test_dhcp_vendor_class_required_and_longest_prefix_5(self):
+        sig = DhcpSignature(
+            vendor="Android",
+            category="Smartphone",
+            os_family="Android",
+            param_list=(1, 3, 6, 15, 26),
+            vendor_class_pattern=r"^android-dhcp-",
+        )
+        # Missing vendor class must not match when vendor_class_pattern is required
+        self.assertFalse(sig.matches((1, 3, 6, 15, 26), vendor_class=None))
+        # Overlap < 5 must not prefix-match
+        generic = DhcpSignature(
+            vendor="Generic", category="Other", os_family="Unknown", param_list=(1, 3, 6, 15)
+        )
+        self.assertFalse(generic.matches((1, 3, 6, 15, 28, 42)))
+
+        # SignatureManager picks longest prefix (>=5) match
+        mgr = SignatureManager()
+        mgr.dhcp_signatures = [
+            DhcpSignature(vendor="Short", category="Other", os_family="OS1", param_list=(1, 3, 6, 15, 28)),
+            DhcpSignature(vendor="Long", category="IoT", os_family="OS2", param_list=(1, 3, 6, 15, 28, 42)),
+        ]
+        # Short matches 5-element prefix, Long matches 6-element prefix -> Long wins
+        match = mgr.match_dhcp([1, 3, 6, 15, 28, 42, 88])
+        self.assertIsNotNone(match)
+        self.assertEqual(match.vendor, "Long")
+
+    def test_tcp_syn_wildcard_ttl_and_store_clears_stale_match(self):
+        from alien_hunter.identifiers.signatures import TcpSynSignature, TcpSynFingerprintStore
+
+        mgr = SignatureManager()
+        wildcard_match = mgr.match_tcp_syn(ttl=255, options=[])
+        self.assertIsNotNone(wildcard_match)
+        self.assertIn("Router", wildcard_match.vendor + wildcard_match.category)
+
+        store = TcpSynFingerprintStore(max_entries=10)
+        sig_win = TcpSynSignature("Windows", "PC", "Windows", 128, (2, 1, 3, 1, 1, 4))
+        store.record("198.51.100.30", ttl=128, options=[2, 1, 3, 1, 1, 4], match=sig_win)
+        # Stack changes to Linux TTL 64 with match=None -> stale Windows match must be cleared
+        store.record("198.51.100.30", ttl=64, options=[2, 4, 8, 1, 3], match=None)
+        self.assertIsNone(store.get("198.51.100.30")["match"])
+
+    def test_vendor_resolver_skips_http_for_randomized_mac(self):
+        from unittest.mock import patch
+        from alien_hunter.identifiers.vendor import MacVendorResolver
+
+        resolver = MacVendorResolver()
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            vendor, is_rand = resolver.resolve("02-00-00-11-22-33")
+            self.assertTrue(is_rand)
+            self.assertEqual(vendor, "Randomized Private MAC")
+            mock_urlopen.assert_not_called()
+
+    def test_console_reporter_strips_ansi_escape_sequences(self):
+        import io
+        from contextlib import redirect_stdout
+        from alien_hunter.models import Device
+        from alien_hunter.reporting.console import ConsoleReporter
+
+        malicious = Device(
+            ip="198.51.100.55",
+            mac="02:00:00:00:00:55",
+            hostname="\x1b[31mFAKE\x1b]0;TITLE\x07\r\nHOST",
+            vendor="\x1b[2JEvil",
+        )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ConsoleReporter.render_table([malicious])
+        out = buf.getvalue()
+        self.assertNotIn("\x1b]0;TITLE", out)
+        self.assertNotIn("\x1b[2J", out)
+
+
 if __name__ == "__main__":
     unittest.main()

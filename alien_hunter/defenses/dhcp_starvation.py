@@ -89,6 +89,10 @@ class DhcpStarvationGuard:
         # Sliding window history: list of dict records
         # record: {"time": float, "src_mac": str, "chaddr": str, "msg_type": int, "xid": bytes}
         self._history: collections.deque = collections.deque()
+        self._max_history = 20000
+        self._chaddr_counts: Dict[str, int] = {}
+        self._src_mac_counts: Dict[str, int] = {}
+        self._spoofed_count: int = 0
         self._last_alert_time: float = 0.0
         self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
@@ -236,26 +240,29 @@ class DhcpStarvationGuard:
             )
 
         with self._lock:
-            self._history.append(
-                {
-                    "time": now,
-                    "src_mac": parsed["src_mac"],
-                    "chaddr": parsed["chaddr"],
-                    "msg_type": parsed["msg_type"],
-                    "xid": parsed["xid"],
-                    "is_spoofed": parsed["is_spoofed"],
-                }
-            )
+            if len(self._history) >= self._max_history:
+                self._pop_oldest_history_locked()
+            rec = {
+                "time": now,
+                "src_mac": parsed["src_mac"],
+                "chaddr": parsed["chaddr"],
+                "msg_type": parsed["msg_type"],
+                "xid": parsed["xid"],
+                "is_spoofed": parsed["is_spoofed"],
+            }
+            self._history.append(rec)
+            self._chaddr_counts[rec["chaddr"]] = self._chaddr_counts.get(rec["chaddr"], 0) + 1
+            self._src_mac_counts[rec["src_mac"]] = self._src_mac_counts.get(rec["src_mac"], 0) + 1
+            if rec["is_spoofed"]:
+                self._spoofed_count += 1
 
-            # Evict entries older than window_seconds
+            # Evict entries older than window_seconds in O(1) amortized
             cutoff = now - self.window_seconds
             while self._history and self._history[0]["time"] < cutoff:
-                self._history.popleft()
+                self._pop_oldest_history_locked()
 
             total_requests = len(self._history)
-            distinct_chaddrs = list(dict.fromkeys(r["chaddr"] for r in self._history))
-            distinct_src_macs = set(r["src_mac"] for r in self._history)
-            spoofed_entries = [r for r in self._history if r["is_spoofed"]]
+            distinct_chaddrs = list(self._chaddr_counts.keys())
 
             if total_requests < 2:
                 return None
@@ -273,15 +280,13 @@ class DhcpStarvationGuard:
                 is_starvation = True
             elif len(distinct_chaddrs) >= 3 and burst_rate >= self.rate_threshold:
                 is_starvation = True
-            elif len(spoofed_entries) >= 3 and len(distinct_chaddrs) >= 3:
+            elif self._spoofed_count >= 3 and len(distinct_chaddrs) >= 3:
                 is_starvation = True
 
             if is_starvation:
                 if now - self._last_alert_time >= self.alert_cooldown:
                     self._last_alert_time = now
-                    # Identify primary physical L2 source if common
-                    src_counter = collections.Counter(r["src_mac"] for r in self._history)
-                    primary_src, _ = src_counter.most_common(1)[0]
+                    primary_src = max(self._src_mac_counts.keys(), key=lambda m: self._src_mac_counts[m])
 
                     event = DhcpStarvationEvent(
                         distinct_macs=distinct_chaddrs,
@@ -290,12 +295,27 @@ class DhcpStarvationGuard:
                         window_seconds=round(duration, 2),
                         timestamp=now,
                         primary_src_mac=primary_src,
-                        is_spoofed_chaddr=len(spoofed_entries) > 0,
+                        is_spoofed_chaddr=self._spoofed_count > 0,
                     )
                     self._detected_events.append(event)
                     return event
 
         return None
+
+    def _pop_oldest_history_locked(self) -> None:
+        old = self._history.popleft()
+        if old["is_spoofed"] and self._spoofed_count > 0:
+            self._spoofed_count -= 1
+        c_cnt = self._chaddr_counts.get(old["chaddr"], 0)
+        if c_cnt <= 1:
+            self._chaddr_counts.pop(old["chaddr"], None)
+        else:
+            self._chaddr_counts[old["chaddr"]] = c_cnt - 1
+        s_cnt = self._src_mac_counts.get(old["src_mac"], 0)
+        if s_cnt <= 1:
+            self._src_mac_counts.pop(old["src_mac"], None)
+        else:
+            self._src_mac_counts[old["src_mac"]] = s_cnt - 1
 
     def sniff(self, duration: float = 2.0) -> List[DhcpStarvationEvent]:
         """
@@ -366,7 +386,7 @@ class DhcpStarvationGuard:
         """Stops the background listener thread."""
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
 
     @property
     def is_running(self) -> bool:
@@ -388,7 +408,7 @@ class DhcpStarvationGuard:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(1.0)
+            raw_sock.settimeout(0.25)
             while self._running:
                 try:
                     pkt, _ = raw_sock.recvfrom(2048)
@@ -400,6 +420,7 @@ class DhcpStarvationGuard:
         except Exception:
             pass
         finally:
+            self._running = False
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,

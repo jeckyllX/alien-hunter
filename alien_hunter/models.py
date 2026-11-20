@@ -165,6 +165,7 @@ class SentinelConfig:
     interval: int = 300
     deep_scan: bool = False
     interface: Optional[str] = None
+    config_path: Optional[str] = None
     whitelist_path: Optional[str] = None
     events_path: Optional[str] = None
     custom_ports: Optional[List[int]] = None
@@ -194,16 +195,33 @@ class SentinelConfig:
         Builds a SentinelConfig from a parsed ``config.json`` mapping, applying
         the ``defenses``/``web_ui`` sections, then any explicit keyword overrides.
         """
-        config = config or {}
-        defenses = config.get("defenses", {}) or {}
-        web = config.get("web_ui", {}) or {}
+        config = config if isinstance(config, dict) else {}
+        defenses = config.get("defenses")
+        if not isinstance(defenses, dict):
+            defenses = {}
+        web = config.get("web_ui")
+        if not isinstance(web, dict):
+            web = {}
+
+        def _safe_int(val: Any, default: int, min_val: Optional[int] = None) -> int:
+            if val is None or isinstance(val, bool):
+                out = default
+            else:
+                try:
+                    out = int(val)
+                except (ValueError, TypeError):
+                    out = default
+            if min_val is not None:
+                out = max(min_val, out)
+            return out
 
         honey_enabled = defenses.get("honey_port_enabled", True)
         values: Dict[str, Any] = {
+            "interval": _safe_int(config.get("poll_interval_seconds"), 300, min_val=1),
             "web_enabled": bool(web.get("enabled", False)),
-            "web_host": str(web.get("host", "0.0.0.0")),
-            "web_port": int(web.get("port", 8080)),
-            "web_auth": web.get("auth"),
+            "web_host": str(web.get("host") or "0.0.0.0"),
+            "web_port": _safe_int(web.get("port"), 8080, min_val=1),
+            "web_auth": web.get("auth") if isinstance(web.get("auth"), dict) else None,
             "honey_ports": defenses.get("honey_ports", [5555, 2323, 8888]) if honey_enabled else None,
             "syn_scan_enabled": bool(defenses.get("syn_scan_enabled", True)),
             "dns_tunneling_enabled": bool(defenses.get("dns_tunneling_enabled", True)),
@@ -212,8 +230,8 @@ class SentinelConfig:
             "icmp_redirect_enabled": bool(defenses.get("icmp_redirect_enabled", True)),
             "rogue_dhcp_enabled": bool(defenses.get("rogue_dhcp_enabled", True)),
             "storm_guard_enabled": bool(defenses.get("storm_guard_enabled", True)),
-            "cam_flood_threshold": int(defenses.get("cam_flood_threshold", 30)),
-            "broadcast_storm_threshold": int(defenses.get("broadcast_storm_threshold", 150)),
+            "cam_flood_threshold": _safe_int(defenses.get("cam_flood_threshold"), 30, min_val=1),
+            "broadcast_storm_threshold": _safe_int(defenses.get("broadcast_storm_threshold"), 400, min_val=1),
             "sync_db": bool(config.get("auto_sync_database", True)),
         }
         # Only apply overrides that correspond to real dataclass fields; silently
@@ -222,4 +240,5 @@ class SentinelConfig:
         values.update(
             {k: v for k, v in overrides.items() if v is not None and k in known_fields}
         )
+        values["interval"] = max(1, int(values["interval"]))
         return cls(**values)

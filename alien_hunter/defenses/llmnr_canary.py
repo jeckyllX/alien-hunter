@@ -38,9 +38,10 @@ class LlmnrCanaryTrap:
 
     @classmethod
     def build_llmnr_query(cls, hostname: str, trans_id: int) -> bytes:
-        """Constructs an RFC 4795 LLMNR query packet."""
+        """Constructs an RFC 4795 LLMNR single-label query packet."""
         header = struct.pack("!HHHHHH", trans_id, 0x0000, 1, 0, 0, 0)
-        qname = cls._encode_dns_label(f"{hostname}.local")
+        clean_name = hostname[:-6] if hostname.lower().endswith(".local") else hostname
+        qname = cls._encode_dns_label(clean_name)
         question = qname + struct.pack("!HH", 1, 1)  # TYPE A, CLASS IN
         return header + question
 
@@ -87,7 +88,8 @@ class LlmnrCanaryTrap:
 
         try:
             sock_llmnr = create_udp_socket(interface=interface, broadcast=True, timeout=0.3)
-            sock_llmnr.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+            # RFC 4795 requires IP TTL / hop limit = 1 for link-local LLMNR multicast
+            sock_llmnr.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
 
             sock_nbt = create_udp_socket(interface=interface, broadcast=True, timeout=0.3)
 
@@ -112,9 +114,9 @@ class LlmnrCanaryTrap:
                 try:
                     data, addr = sock_llmnr.recvfrom(2048)
                     if len(data) >= 12:
-                        resp_id, flags = struct.unpack("!HH", data[:4])
-                        # If response flag is set and matches our query ID
-                        if (flags & 0x8000) and resp_id == trans_id_llmnr:
+                        resp_id, flags, _, ancount = struct.unpack("!HHHH", data[:8])
+                        # Response bit set, RCODE == 0, non-empty answers, matching TXID
+                        if (flags & 0x8000) and (flags & 0x000F) == 0 and ancount > 0 and resp_id == trans_id_llmnr:
                             responders.add((addr[0], "LLMNR"))
                 except (socket.timeout, BlockingIOError):
                     pass
@@ -125,8 +127,8 @@ class LlmnrCanaryTrap:
                 try:
                     data, addr = sock_nbt.recvfrom(2048)
                     if len(data) >= 12:
-                        resp_id, flags = struct.unpack("!HH", data[:4])
-                        if (flags & 0x8000) and resp_id == trans_id_nbt:
+                        resp_id, flags, _, ancount = struct.unpack("!HHHH", data[:8])
+                        if (flags & 0x8000) and (flags & 0x000F) == 0 and ancount > 0 and resp_id == trans_id_nbt:
                             responders.add((addr[0], "NetBIOS-NS"))
                 except (socket.timeout, BlockingIOError):
                     pass

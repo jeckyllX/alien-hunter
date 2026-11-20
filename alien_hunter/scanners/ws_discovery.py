@@ -56,7 +56,7 @@ class WsDiscoveryScanner:
             types_found: List[str] = []
             scopes_found: List[str] = []
             xaddrs_found: List[str] = []
-            resolved_ip = src_ip
+            xaddrs_ips: List[str] = []
 
             # Locate ProbeMatch blocks regardless of namespace prefixes
             for elem in root.iter():
@@ -76,7 +76,7 @@ class WsDiscoveryScanner:
                                     try:
                                         ip_obj = ipaddress.ip_address(parsed.hostname)
                                         if not ip_obj.is_loopback and not ip_obj.is_unspecified and not ip_obj.is_multicast:
-                                            resolved_ip = str(ip_obj)
+                                            xaddrs_ips.append(str(ip_obj))
                                     except ValueError:
                                         pass
 
@@ -94,12 +94,13 @@ class WsDiscoveryScanner:
                     break
 
             return {
-                "ip": resolved_ip,
+                "ip": src_ip,
                 "types": types_found,
                 "xaddrs": xaddrs_found,
+                "xaddrs_ips": xaddrs_ips,
                 "scopes": scopes_found,
                 "device_name": inferred_name,
-                "is_onvif": any("onvif" in s.lower() or "onvif" in t.lower() for s in scopes_found for t in types_found),
+                "is_onvif": any("onvif" in s.lower() for s in scopes_found) or any("onvif" in t.lower() for t in types_found),
             }
         except Exception:
             return None
@@ -121,11 +122,11 @@ class WsDiscoveryScanner:
             while time.time() - start_time < timeout:
                 try:
                     data, addr = sock.recvfrom(4096)
+                    peer_ip = str(addr[0]).split("%", 1)[0]
                     xml_text = data.decode("utf-8", errors="replace")
-                    parsed = self.parse_probe_match(xml_text, addr[0])
-                    if parsed and parsed.get("ip"):
-                        dev_ip = parsed["ip"]
-                        results[dev_ip] = parsed
+                    parsed = self.parse_probe_match(xml_text, peer_ip)
+                    if parsed and peer_ip:
+                        results[peer_ip] = parsed
                 except socket.timeout:
                     continue
                 except Exception:

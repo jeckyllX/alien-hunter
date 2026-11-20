@@ -770,7 +770,7 @@ function renderAiPosture(posture) {
                 <span style="color: var(--text-dim); margin: 0 8px;">➔</span>
                 <span style="color: var(--accent-cyan);">${escapeHtml(p.target || 'Target Asset')}</span>
               </div>
-              <span class="badge ${sevClass}">${sev}</span>
+              <span class="badge ${sevClass}">${escapeHtml(sev)}</span>
             </div>
             <div style="font-size: 0.82rem; color: var(--text-dim); margin-bottom: 4px;">
               <strong style="color: var(--text-main);">Vector:</strong> ${escapeHtml(p.vector || '')}
@@ -823,17 +823,17 @@ function renderAlienTable() {
       const r = (ai.risk_level || '').toUpperCase();
       const cls = (r === 'CRITICAL' || r === 'HIGH') ? 'badge-sev-critical' : (r === 'MEDIUM' ? 'badge-sev-warn' : 'badge-active');
       const vulnCount = Array.isArray(ai.vulnerabilities) && ai.vulnerabilities.length > 0 ? ` [${ai.vulnerabilities.length} vuln${ai.vulnerabilities.length > 1 ? 's' : ''}]` : '';
-      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${r}${vulnCount}</span>`;
+      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${escapeHtml(r)}${vulnCount}</span>`;
     }
     return `
-      <tr class="clickable-row" onclick="openDeviceDetails('${mac}')" title="Click to view full device telemetry and history">
+      <tr class="clickable-row" data-mac="${mac}" title="Click to view full device telemetry and history">
         <td class="mono" style="font-weight: 600;">${ip}</td>
         <td class="mono">${mac}</td>
         <td>${escapeHtml(dev.vendor || 'Unknown')}</td>
         <td>${escapeHtml(dev.hostname || dev.discovery_method || 'Unknown')}${aiBadge}</td>
         <td class="ports-list">${escapeHtml(ports)}</td>
         <td>
-          <button class="btn-success" onclick="event.stopPropagation(); openWhitelistModal('${mac}', '${ip}', '${name}')">
+          <button type="button" class="btn-success btn-open-whitelist" data-mac="${mac}" data-ip="${ip}" data-name="${name}">
             ➕ Whitelist
           </button>
         </td>
@@ -912,7 +912,7 @@ function renderTrustedTable() {
       const r = ai.risk_level.toUpperCase();
       const cls = (r === 'CRITICAL' || r === 'HIGH') ? 'badge-sev-critical' : 'badge-sev-warn';
       const vulnCount = Array.isArray(ai.vulnerabilities) && ai.vulnerabilities.length > 0 ? ` [${ai.vulnerabilities.length} vuln${ai.vulnerabilities.length > 1 ? 's' : ''}]` : '';
-      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${r}${vulnCount}</span>`;
+      aiBadge = ` <span class="badge ${cls}" style="font-size: 0.65rem; padding: 1px 5px;" title="${escapeHtml(ai.summary || '')}">🤖 ${escapeHtml(r)}${vulnCount}</span>`;
     }
     const ip = dev.ip || dev.primary_ip || '--';
     const aliasList = Array.isArray(dev.aliases) ? dev.aliases : [];
@@ -921,7 +921,7 @@ function renderTrustedTable() {
     const ports = portList.join(', ') || '--';
 
     return `
-      <tr class="clickable-row" onclick="openDeviceDetails('${dev.mac || ''}')" title="Click to view full device telemetry and history">
+      <tr class="clickable-row" data-mac="${escapeHtml(dev.mac || '')}" title="Click to view full device telemetry and history">
         <td><strong>${escapeHtml(friendly)}</strong>${owner}${statusBadge}${aiBadge}${hostSubtitle}</td>
         <td class="mono">${escapeHtml(ip)}${aliases}</td>
         <td class="mono">${escapeHtml(dev.mac || '')}</td>
@@ -1062,14 +1062,22 @@ function openDeviceDetails(mac) {
 
   // Action buttons
   const actionsDiv = document.getElementById('detailModalActions');
+  actionsDiv.textContent = '';
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.textContent = 'Close';
+  closeBtn.addEventListener('click', closeDeviceDetailsModal);
+  actionsDiv.appendChild(closeBtn);
   if (!dev.trusted) {
-    const safeName = escapeHtml(friendly).replace(/'/g, "\\'");
-    actionsDiv.innerHTML = `
-      <button type="button" onclick="closeDeviceDetailsModal()">Close</button>
-      <button type="button" class="btn-success" onclick="closeDeviceDetailsModal(); openWhitelistModal('${dev.mac}', '${dev.ip || ''}', '${safeName}')">➕ Trust / Whitelist Device</button>
-    `;
-  } else {
-    actionsDiv.innerHTML = `<button type="button" onclick="closeDeviceDetailsModal()">Close</button>`;
+    const trustBtn = document.createElement('button');
+    trustBtn.type = 'button';
+    trustBtn.className = 'btn-success';
+    trustBtn.textContent = '➕ Trust / Whitelist Device';
+    trustBtn.addEventListener('click', () => {
+      closeDeviceDetailsModal();
+      openWhitelistModal(dev.mac || '', dev.ip || '', friendly);
+    });
+    actionsDiv.appendChild(trustBtn);
   }
 
   document.getElementById('deviceDetailsModal').style.display = 'flex';
@@ -1259,6 +1267,18 @@ function pollScanProgress() {
   scanPollInterval = setInterval(async () => {
     try {
       const res = await fetch(`${API_BASE}/api/status`);
+      if (res.status === 401) {
+        clearInterval(scanPollInterval);
+        scanPollInterval = null;
+        isScanTriggering = false;
+        const btn = document.getElementById('btnDeepScan');
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '🔍 Deep Scan';
+        }
+        showLoginModal();
+        return;
+      }
       if (res.ok) {
         const status = await res.json();
         if (!status.is_scanning) {
@@ -1289,7 +1309,12 @@ function updatePolling() {
 }
 
 function escapeHtml(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function showLoginModal() {
@@ -1366,6 +1391,32 @@ async function logout() {
   } catch (e) {}
   showToast('Logged out');
   showLoginModal();
+}
+
+// Delegated click handlers for device rows and whitelist buttons
+const alienTbodyEl = document.getElementById('alienTableBody');
+if (alienTbodyEl) {
+  alienTbodyEl.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-open-whitelist');
+    if (btn) {
+      e.stopPropagation();
+      openWhitelistModal(btn.dataset.mac || '', btn.dataset.ip || '', btn.dataset.name || '');
+      return;
+    }
+    const row = e.target.closest('tr[data-mac]');
+    if (row && row.dataset.mac) {
+      openDeviceDetails(row.dataset.mac);
+    }
+  });
+}
+const trustedTbodyEl = document.getElementById('trustedTableBody');
+if (trustedTbodyEl) {
+  trustedTbodyEl.addEventListener('click', e => {
+    const row = e.target.closest('tr[data-mac]');
+    if (row && row.dataset.mac) {
+      openDeviceDetails(row.dataset.mac);
+    }
+  });
 }
 
 // Initial fetch & start timer

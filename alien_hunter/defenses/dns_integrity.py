@@ -80,14 +80,15 @@ class DnsIntegrityAuditor:
         for _ in range(qdcount):
             if offset >= len(data):
                 return rcode, []
-            while offset < len(data) and data[offset] != 0:
+            while offset < len(data):
                 length = data[offset]
+                if length == 0:
+                    offset += 1
+                    break
                 if (length & 0xC0) == 0xC0:
                     offset += 2
                     break
                 offset += 1 + length
-            if offset < len(data) and data[offset] == 0:
-                offset += 1
             offset += 4  # QTYPE + QCLASS
 
         ips: List[str] = []
@@ -127,21 +128,15 @@ class DnsIntegrityAuditor:
         """Sends a direct UDP 53 DNS query to a specific resolver."""
         trans_id = struct.unpack("!H", os.urandom(2))[0]
         pkt = cls.build_dns_query(domain, trans_id)
-        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(timeout)
-            sock.sendto(pkt, (server_ip, 53))
-            data, _ = sock.recvfrom(2048)
-            return cls._parse_dns_a_response(data, trans_id)
+            family = socket.AF_INET6 if ipaddress.ip_address(server_ip.split("%", 1)[0]).version == 6 else socket.AF_INET
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(timeout)
+                sock.sendto(pkt, (server_ip, 53))
+                data, _ = sock.recvfrom(2048)
+                return cls._parse_dns_a_response(data, trans_id)
         except Exception:
             return -1, []
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except Exception:
-                    pass
 
     @classmethod
     def audit_dns(

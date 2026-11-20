@@ -46,6 +46,8 @@ class NotificationEngine:
         """
         engine = cls()
         notifications_cfg = config.get("notifications", {})
+        if not isinstance(notifications_cfg, dict):
+            return engine
 
         for hook_name, hook_cfg in notifications_cfg.items():
             if not isinstance(hook_cfg, dict) or not hook_cfg.get("enabled", True):
@@ -53,7 +55,9 @@ class NotificationEngine:
 
             hook_cls = cls.HOOK_REGISTRY.get(hook_name.lower())
             if hook_cls:
-                engine.register_hook(hook_cls(hook_cfg))
+                hook = hook_cls(hook_cfg)
+                if hook.is_configured:
+                    engine.register_hook(hook)
 
         return engine
 

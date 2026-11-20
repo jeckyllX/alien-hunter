@@ -121,8 +121,8 @@ class DnsTunnelingDetector:
             except Exception:
                 self._local_network = None
 
-        # State tracking: src_ip -> list of query records
-        self._queries: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
+        # State tracking: src_ip -> bounded query records
+        self._queries: Dict[str, List[Dict[str, Any]]] = collections.OrderedDict()
         self._last_alert_time: Dict[str, float] = {}
         self._detected_events: collections.deque = collections.deque(maxlen=250)
         self._lock = threading.Lock()
@@ -285,7 +285,8 @@ class DnsTunnelingDetector:
 
         with self._lock:
             cutoff = now - self.window_seconds
-            queries = [q for q in self._queries[src_ip] if q["timestamp"] >= cutoff]
+            existing_queries = self._queries.get(src_ip, [])
+            queries = [q for q in existing_queries if q["timestamp"] >= cutoff]
             queries.append(
                 {
                     "timestamp": now,
@@ -295,12 +296,20 @@ class DnsTunnelingDetector:
                     "qtype": qtype,
                 }
             )
-            self._queries[src_ip] = queries
-
-            if len(self._queries) > 1000:
+            if len(queries) > 256:
+                queries = queries[-256:]
+            if src_ip in self._queries:
+                self._queries.move_to_end(src_ip)
+            elif len(self._queries) >= 2048:
                 expired = [k for k, v in self._queries.items() if not v or v[-1]["timestamp"] < cutoff]
                 for k in expired:
                     del self._queries[k]
+                while len(self._queries) >= 2048:
+                    self._queries.popitem(last=False)
+            self._queries[src_ip] = queries
+            if len(self._last_alert_time) > 2048:
+                oldest_alert_ip = min(self._last_alert_time.keys(), key=lambda k: self._last_alert_time[k])
+                del self._last_alert_time[oldest_alert_ip]
 
             # Trigger condition: immediate high-confidence or burst threshold reached
             if is_immediate or len(queries) >= self.burst_threshold:
@@ -392,7 +401,11 @@ class DnsTunnelingDetector:
         """Stops the background listener thread."""
         self._running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            self._thread.join(timeout=1.5)
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     def _sniff_loop(self):
         """Continuous sniffing loop executed in background daemon thread."""
@@ -410,7 +423,7 @@ class DnsTunnelingDetector:
                     packet_mr_promisc=self.PACKET_MR_PROMISC,
                 )
 
-            raw_sock.settimeout(1.0)
+            raw_sock.settimeout(0.25)
             while self._running:
                 try:
                     pkt, _ = raw_sock.recvfrom(2048)
@@ -422,6 +435,7 @@ class DnsTunnelingDetector:
         except Exception:
             pass
         finally:
+            self._running = False
             if raw_sock:
                 disable_promiscuous_mode(
                     raw_sock,

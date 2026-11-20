@@ -9,7 +9,7 @@ import os
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
 from ..config import ConfigManager
@@ -24,22 +24,34 @@ class DhcpSignature:
     param_list: Tuple[int, ...]
     vendor_class_pattern: Optional[str] = None
     confidence: str = "HIGH"
+    _compiled_vc: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+
+    def matches_vendor_class(self, vendor_class: Optional[str] = None) -> bool:
+        """Validates optional vendor class regex against provided vendor class."""
+        if not self.vendor_class_pattern:
+            return True
+        if not vendor_class:
+            return False
+        if self._compiled_vc is not None:
+            return bool(self._compiled_vc.search(vendor_class))
+        try:
+            return bool(re.search(self.vendor_class_pattern, vendor_class, re.IGNORECASE))
+        except re.error:
+            return False
 
     def matches(self, incoming_params: Tuple[int, ...], vendor_class: Optional[str] = None) -> bool:
         """Evaluates whether incoming DHCP parameters match this signature."""
-        if vendor_class and self.vendor_class_pattern:
-            if not re.search(self.vendor_class_pattern, vendor_class, re.IGNORECASE):
-                return False
+        if not self.matches_vendor_class(vendor_class):
+            return False
 
         # Exact sequence match
         if self.param_list == incoming_params:
             return True
 
-        # Prefix / subset match if length >= 4
-        if len(self.param_list) >= 4 and len(incoming_params) >= 4:
-            min_len = min(len(self.param_list), len(incoming_params))
-            if self.param_list[:min_len] == incoming_params[:min_len]:
-                return True
+        # Prefix / subset match if overlap length >= 5
+        min_len = min(len(self.param_list), len(incoming_params))
+        if min_len >= 5 and self.param_list[:min_len] == incoming_params[:min_len]:
+            return True
 
         return False
 
@@ -62,14 +74,28 @@ class SsdpSignature:
     server_pattern: Optional[str] = None
     target_pattern: Optional[str] = None
     confidence: str = "HIGH"
+    _compiled_server: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
+    _compiled_target: Optional[re.Pattern] = field(default=None, repr=False, compare=False)
 
     def matches(self, server: Optional[str] = None, target: Optional[str] = None) -> bool:
         if self.server_pattern and server:
-            if re.search(self.server_pattern, server, re.IGNORECASE):
-                return True
+            try:
+                if self._compiled_server is not None:
+                    if self._compiled_server.search(server):
+                        return True
+                elif re.search(self.server_pattern, server, re.IGNORECASE):
+                    return True
+            except re.error:
+                pass
         if self.target_pattern and target:
-            if re.search(self.target_pattern, target, re.IGNORECASE):
-                return True
+            try:
+                if self._compiled_target is not None:
+                    if self._compiled_target.search(target):
+                        return True
+                elif re.search(self.target_pattern, target, re.IGNORECASE):
+                    return True
+            except re.error:
+                pass
         return False
 
 
@@ -95,6 +121,10 @@ class TcpSynSignature:
 
         if not ttl_match:
             return False
+
+        # Wildcard TTL-only signature (e.g. network appliances without fixed options)
+        if not self.options:
+            return True
 
         # Exact sequence match on options
         if self.options == incoming_options:
@@ -135,6 +165,30 @@ class SignatureManager:
     """
 
     BUNDLED_FILENAME = "signatures.json"
+    _default_instance: Optional["SignatureManager"] = None
+    _instance_lock = threading.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "SignatureManager":
+        """Returns a shared SignatureManager singleton, reloading if the signature file changed."""
+        with cls._instance_lock:
+            if cls._default_instance is None:
+                cls._default_instance = cls()
+                return cls._default_instance
+            inst = cls._default_instance
+
+        current_path = inst.resolve_signature_path()
+        try:
+            current_mtime = os.path.getmtime(current_path) if os.path.exists(current_path) else None
+        except OSError:
+            current_mtime = None
+
+        with inst._lock:
+            needs_reload = current_path != inst._loaded_path or current_mtime != inst._loaded_mtime
+
+        if needs_reload:
+            inst.reload()
+        return inst
 
     def __init__(self, custom_path: Optional[str] = None):
         self.custom_path = custom_path
@@ -146,6 +200,8 @@ class SignatureManager:
         self.ssdp_signatures: List[SsdpSignature] = []
         self.tcp_syn_signatures: List[TcpSynSignature] = []
         self.active_path: Optional[str] = None
+        self._loaded_path: Optional[str] = None
+        self._loaded_mtime: Optional[float] = None
         self.reload()
 
     def resolve_signature_path(self) -> str:
@@ -179,25 +235,34 @@ class SignatureManager:
                     path = fallback_path
                     self.active_path = path
 
+            try:
+                self._loaded_path = path
+                self._loaded_mtime = os.path.getmtime(path) if os.path.exists(path) else None
+            except OSError:
+                self._loaded_mtime = None
+
             data = ConfigManager.load_json(path, default={})
             self.version = str(data.get("version", "1.0.0"))
             self.updated_at = str(data.get("updated_at", ""))
 
-            # Parse DHCP signatures
+            # Parse DHCP signatures (pre-compile vendor class regex and skip malformed entries)
             dhcp_list: List[DhcpSignature] = []
             for item in data.get("dhcp_signatures", []):
                 try:
                     params = tuple(int(x) for x in item.get("param_list", []))
                     if not params:
                         continue
+                    vc_pat = item.get("vendor_class_pattern")
+                    compiled_vc = re.compile(vc_pat, re.IGNORECASE) if vc_pat else None
                     dhcp_list.append(
                         DhcpSignature(
                             vendor=str(item.get("vendor", "Unknown")),
                             category=str(item.get("category", "Unknown Device")),
                             os_family=str(item.get("os_family", "Unknown")),
                             param_list=params,
-                            vendor_class_pattern=item.get("vendor_class_pattern"),
+                            vendor_class_pattern=vc_pat,
                             confidence=str(item.get("confidence", "HIGH")),
+                            _compiled_vc=compiled_vc,
                         )
                     )
                 except Exception:
@@ -219,18 +284,24 @@ class SignatureManager:
                     continue
             self.mdns_signatures = mdns_map
 
-            # Parse SSDP signatures
+            # Parse SSDP signatures (pre-compile regex and skip malformed entries)
             ssdp_list: List[SsdpSignature] = []
             for item in data.get("ssdp_signatures", []):
                 try:
+                    srv_pat = item.get("server_pattern")
+                    tgt_pat = item.get("target_pattern")
+                    compiled_srv = re.compile(srv_pat, re.IGNORECASE) if srv_pat else None
+                    compiled_tgt = re.compile(tgt_pat, re.IGNORECASE) if tgt_pat else None
                     ssdp_list.append(
                         SsdpSignature(
                             vendor=str(item.get("vendor", "Unknown")),
                             category=str(item.get("category", "Unknown Device")),
                             os_family=str(item.get("os_family", "Unknown")),
-                            server_pattern=item.get("server_pattern"),
-                            target_pattern=item.get("target_pattern"),
+                            server_pattern=srv_pat,
+                            target_pattern=tgt_pat,
                             confidence=str(item.get("confidence", "HIGH")),
+                            _compiled_server=compiled_srv,
+                            _compiled_target=compiled_tgt,
                         )
                     )
                 except Exception:
@@ -269,37 +340,52 @@ class SignatureManager:
     ) -> Optional[DeviceFingerprintMatch]:
         """
         Matches a client's DHCP Option 55 parameter sequence against the signature database.
-        Checks exact matches first, then prefix/vendor class matches.
+        Checks exact matches first, then longest prefix match (>= 5 parameters).
         """
         if not param_list:
             return None
 
         incoming_tuple = tuple(int(p) for p in param_list)
         with self._lock:
-            # Pass 1: Exact matches
+            # Pass 1: Exact matches (prefer signatures that also match vendor_class_pattern)
+            exact_best: Optional[DhcpSignature] = None
             for sig in self.dhcp_signatures:
-                if sig.param_list == incoming_tuple:
-                    if not sig.vendor_class_pattern or (
-                        vendor_class and re.search(sig.vendor_class_pattern, vendor_class, re.IGNORECASE)
-                    ):
-                        return DeviceFingerprintMatch(
-                            vendor=sig.vendor,
-                            category=sig.category,
-                            os_family=sig.os_family,
-                            source="DHCP Option 55 (Exact Match)",
-                            confidence=sig.confidence,
-                        )
+                if sig.param_list == incoming_tuple and sig.matches_vendor_class(vendor_class):
+                    if sig.vendor_class_pattern:
+                        exact_best = sig
+                        break
+                    if exact_best is None:
+                        exact_best = sig
+            if exact_best is not None:
+                return DeviceFingerprintMatch(
+                    vendor=exact_best.vendor,
+                    category=exact_best.category,
+                    os_family=exact_best.os_family,
+                    source="DHCP Option 55 (Exact Match)",
+                    confidence=exact_best.confidence,
+                )
 
-            # Pass 2: Fuzzy/prefix matches
+            # Pass 2: Fuzzy/prefix matches (require >= 5 prefix overlap, pick longest match)
+            best_prefix: Optional[DhcpSignature] = None
+            best_score: Tuple[int, int] = (0, -1)
             for sig in self.dhcp_signatures:
-                if sig.matches(incoming_tuple, vendor_class):
-                    return DeviceFingerprintMatch(
-                        vendor=sig.vendor,
-                        category=sig.category,
-                        os_family=sig.os_family,
-                        source="DHCP Option 55 (Prefix Match)",
-                        confidence="MEDIUM" if sig.confidence == "HIGH" else sig.confidence,
-                    )
+                if not sig.matches_vendor_class(vendor_class):
+                    continue
+                min_len = min(len(sig.param_list), len(incoming_tuple))
+                if min_len >= 5 and sig.param_list[:min_len] == incoming_tuple[:min_len]:
+                    score = (min_len, 1 if sig.vendor_class_pattern else 0)
+                    if score > best_score:
+                        best_score = score
+                        best_prefix = sig
+
+            if best_prefix is not None:
+                return DeviceFingerprintMatch(
+                    vendor=best_prefix.vendor,
+                    category=best_prefix.category,
+                    os_family=best_prefix.os_family,
+                    source="DHCP Option 55 (Prefix Match)",
+                    confidence="MEDIUM" if best_prefix.confidence == "HIGH" else best_prefix.confidence,
+                )
 
         return None
 
@@ -350,25 +436,38 @@ class SignatureManager:
         Matches passive TCP SYN stack parameters (IP TTL and TCP options ordering)
         against canonical operating system TCP stack fingerprints.
         """
-        if not ttl or not options:
+        if not ttl:
             return None
 
-        opts_tuple = tuple(int(x) for x in options)
+        opts_tuple = tuple(int(x) for x in (options or ()))
         with self._lock:
-            # Pass 1: Exact matches
-            for sig in self.tcp_syn_signatures:
-                if sig.initial_ttl == ttl and sig.options == opts_tuple:
-                    return DeviceFingerprintMatch(
-                        vendor=sig.vendor,
-                        category=sig.category,
-                        os_family=sig.os_family,
-                        source="Passive TCP SYN (Exact Match)",
-                        confidence=sig.confidence,
-                    )
+            # Pass 1: Exact matches (option-bearing signatures)
+            if opts_tuple:
+                for sig in self.tcp_syn_signatures:
+                    if sig.options and sig.initial_ttl == ttl and sig.options == opts_tuple:
+                        return DeviceFingerprintMatch(
+                            vendor=sig.vendor,
+                            category=sig.category,
+                            os_family=sig.os_family,
+                            source="Passive TCP SYN (Exact Match)",
+                            confidence=sig.confidence,
+                        )
 
-            # Pass 2: Fuzzy/tolerant matches (hop decrements and prefix option match)
+            # Pass 2a: Fuzzy/hop-decrement matches with option constraints
+            if opts_tuple:
+                for sig in self.tcp_syn_signatures:
+                    if sig.options and sig.matches(ttl, opts_tuple):
+                        return DeviceFingerprintMatch(
+                            vendor=sig.vendor,
+                            category=sig.category,
+                            os_family=sig.os_family,
+                            source="Passive TCP SYN",
+                            confidence="MEDIUM" if sig.confidence == "HIGH" else sig.confidence,
+                        )
+
+            # Pass 2b: Wildcard TTL-only signatures (options == ())
             for sig in self.tcp_syn_signatures:
-                if sig.matches(ttl, opts_tuple):
+                if not sig.options and sig.matches(ttl, opts_tuple):
                     return DeviceFingerprintMatch(
                         vendor=sig.vendor,
                         category=sig.category,
@@ -473,7 +572,14 @@ class SsdpFingerprintStore:
                 self._entries.pop(oldest_ip, None)
 
             existing = self._entries.get(ip, {})
-            merged_services = list(set((existing.get("services") or []) + (services or [])))
+            merged_services: List[str] = []
+            seen_svc = set()
+            for svc in (existing.get("services") or []) + (services or []):
+                if svc and svc not in seen_svc:
+                    seen_svc.add(svc)
+                    merged_services.append(svc)
+                    if len(merged_services) >= 50:
+                        break
             self._entries[ip] = {
                 "ip": ip,
                 "server": server or existing.get("server"),
@@ -537,12 +643,21 @@ class TcpSynFingerprintStore:
                 self._entries.pop(oldest_ip, None)
 
             existing = self._entries.get(ip, {})
+            same_stack = (
+                bool(existing)
+                and existing.get("ttl") == ttl
+                and list(existing.get("options") or []) == list(options or [])
+            )
             self._entries[ip] = {
                 "ip": ip,
                 "ttl": ttl,
-                "options": options,
-                "window_size": window_size or existing.get("window_size"),
-                "match": match or existing.get("match"),
+                "options": list(options or []),
+                "window_size": (
+                    window_size
+                    if window_size is not None
+                    else (existing.get("window_size") if same_stack else None)
+                ),
+                "match": match if match is not None else (existing.get("match") if same_stack else None),
                 "timestamp": now,
             }
 

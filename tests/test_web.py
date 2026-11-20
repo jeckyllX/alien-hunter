@@ -106,7 +106,7 @@ class TestSentinelState(unittest.TestCase):
 
         # Audit runs but Test Laptop did NOT respond (it is offline)
         dev_active = Device(
-            ip="192.168.1.1",
+            ip="192.0.2.1",
             mac="02:00:00:00:00:01",
             hostname="gateway.lan",
             trusted=True,
@@ -555,6 +555,28 @@ class TestLightweightWebServer(unittest.TestCase):
         with self.assertRaises(HTTPError) as ctx:
             urlopen(req, timeout=3)
         self.assertEqual(ctx.exception.code, 404)
+
+    def test_state_payload_deep_copy_and_scan_id_tracking(self):
+        payload1 = self.state.get_devices_payload()
+        payload1["trusted"][0]["name"] = "Mutated In Caller"
+        payload1["alien"][0]["ports"].append("9999/TEST")
+        payload2 = self.state.get_devices_payload()
+        self.assertNotEqual(payload2["trusted"][0]["name"], "Mutated In Caller")
+        self.assertNotIn("9999/TEST", payload2["alien"][0]["ports"])
+
+        sid = self.state.begin_triggered_scan()
+        self.assertTrue(self.state.is_scanning)
+        self.assertEqual(self.state.get_status_summary()["scan_id"], sid)
+        self.state.update_audit(devices=[], threats=[], completed_scan_id=sid)
+        self.assertFalse(self.state.is_scanning)
+        self.assertEqual(self.state.get_status_summary()["completed_scan_id"], sid)
+
+    def test_ui_escapes_apostrophe_and_avoids_inline_onclick_interpolation(self):
+        self.assertIn("&#39;", DASHBOARD_HTML)
+        self.assertNotIn("onclick=\"openDeviceDetails('${", DASHBOARD_HTML)
+        self.assertNotIn("onclick=\"whitelistDevice('${", DASHBOARD_HTML)
+        self.assertIn('data-mac="${mac}"', DASHBOARD_HTML)
+        self.assertIn("btn-open-whitelist", DASHBOARD_HTML)
 
 
 if __name__ == "__main__":

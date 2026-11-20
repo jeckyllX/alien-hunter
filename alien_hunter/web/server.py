@@ -4,6 +4,7 @@ Uses standard library http.server (ThreadingHTTPServer) with zero external depen
 Provides REST endpoints and static single-page interface with in-memory state lookup.
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -35,6 +36,7 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
 
     server_version = "AlienHunter-Web/1.0"
     sys_version = ""
+    timeout = 10
 
     def log_message(self, format: str, *args):
         """Suppress default stdout access logging to prevent console pollution."""
@@ -48,6 +50,8 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, TimeoutError):
@@ -62,6 +66,8 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
             if headers:
                 for k, v in headers.items():
                     self.send_header(k, v)
@@ -76,11 +82,24 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         if client_ip in ("127.0.0.1", "::1"):
             forwarded = self.headers.get("X-Forwarded-For")
             if forwarded:
-                client_ip = forwarded.split(",")[0].strip()
-            else:
-                real_ip = self.headers.get("X-Real-IP")
-                if real_ip:
-                    client_ip = real_ip.strip()
+                valid_ips = []
+                for part in forwarded.split(","):
+                    cand = part.strip()
+                    try:
+                        valid_ips.append(ipaddress.ip_address(cand))
+                    except ValueError:
+                        continue
+                if valid_ips:
+                    for ip_obj in reversed(valid_ips):
+                        if not ip_obj.is_loopback:
+                            return str(ip_obj)
+                    return str(valid_ips[-1])
+            real_ip = (self.headers.get("X-Real-IP") or "").strip()
+            if real_ip:
+                try:
+                    return str(ipaddress.ip_address(real_ip))
+                except ValueError:
+                    pass
         return client_ip
 
     def _is_request_authorized(self) -> bool:
@@ -99,7 +118,7 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         # Check session cookie
         cookie_header = self.headers.get("Cookie", "")
         if "ah_session=" in cookie_header:
-            match = re.search(r"ah_session=([^;]+)", cookie_header)
+            match = re.search(r"(?:^|;\s*)ah_session=([^;]+)", cookie_header)
             if match:
                 token = match.group(1).strip()
                 username = auth.session_manager.validate_session(token)
@@ -180,6 +199,10 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self.send_header("Expires", "0")
             self.end_headers()
         elif path in ("/api/status", "/api/devices", "/api/events"):
+            if not self._is_request_authorized():
+                self.send_response(401)
+                self.end_headers()
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -232,8 +255,12 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             self._send_json_response(400, {"success": False, "message": "Invalid JSON payload"})
             return
 
+        if not isinstance(payload, dict):
+            self._send_json_response(400, {"success": False, "message": "Payload must be a JSON object"})
+            return
+
         username = str(payload.get("username", "")).strip()
-        password = str(payload.get("password", "")).strip()
+        password = str(payload.get("password", ""))
         remember_me = bool(payload.get("remember_me", False))
 
         success, token, err_msg, retry_after = auth.authenticate(
@@ -298,11 +325,14 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         if auth and auth.enabled:
             cookie_header = self.headers.get("Cookie", "")
             if "ah_session=" in cookie_header:
-                match = re.search(r"ah_session=([^;]+)", cookie_header)
+                match = re.search(r"(?:^|;\s*)ah_session=([^;]+)", cookie_header)
                 if match:
                     auth.session_manager.revoke_session(match.group(1).strip())
 
+        is_https = self.headers.get("X-Forwarded-Proto", "").lower() == "https"
         cookie_header = "ah_session=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Max-Age=0; HttpOnly; SameSite=Strict"
+        if is_https:
+            cookie_header += "; Secure"
         body = json.dumps({"success": True, "message": "Logged out successfully"}).encode("utf-8")
         try:
             self.send_response(200)
@@ -341,13 +371,16 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
             pass
 
         try:
-            scan_trigger(deep=deep, ai=ai, analyze_all=analyze_all)
+            triggered_id = scan_trigger(deep=deep, ai=ai, analyze_all=analyze_all)
+            state: Optional[SentinelState] = getattr(self.server, "state", None)
+            scan_id = triggered_id if isinstance(triggered_id, int) else (getattr(state, "scan_id", 0) if state else 0)
             self._send_json_response(200, {
                 "success": True,
                 "message": "Manual network audit triggered successfully",
                 "deep": deep,
                 "ai": ai,
                 "analyze_all": analyze_all,
+                "scan_id": scan_id,
             })
         except Exception as e:
             self._send_json_response(500, {"success": False, "message": f"Failed to trigger scan: {e}"})
@@ -441,18 +474,19 @@ class SentinelHTTPHandler(BaseHTTPRequestHandler):
         # Persist to disk via ConfigManager if available, merging with any existing record
         if config_mgr:
             try:
-                whitelist = config_mgr.load_whitelist(whitelist_path)
-                existing_entry = whitelist.get(mac)
-                if isinstance(existing_entry, dict):
-                    merged = dict(existing_entry)
-                    if not primary_ip and merged.get("primary_ip"):
-                        current_entry["primary_ip"] = merged["primary_ip"]
-                    if vendor == "Manual Entry" and merged.get("vendor"):
-                        current_entry["vendor"] = merged["vendor"]
-                    merged.update(current_entry)
-                    current_entry = merged
-                whitelist[mac] = current_entry
-                config_mgr.save_whitelist(whitelist, whitelist_path)
+                def _merge_entry(existing_entry: Optional[dict]) -> dict:
+                    entry_to_save = dict(current_entry)
+                    if isinstance(existing_entry, dict):
+                        merged = dict(existing_entry)
+                        if not primary_ip and merged.get("primary_ip"):
+                            entry_to_save["primary_ip"] = merged["primary_ip"]
+                        if vendor == "Manual Entry" and merged.get("vendor"):
+                            entry_to_save["vendor"] = merged["vendor"]
+                        merged.update(entry_to_save)
+                        return merged
+                    return entry_to_save
+
+                current_entry = config_mgr.update_whitelist_entry(mac, _merge_entry, whitelist_path)
             except Exception as e:
                 self._send_json_response(500, {"success": False, "message": f"Failed to persist whitelist: {e}"})
                 return

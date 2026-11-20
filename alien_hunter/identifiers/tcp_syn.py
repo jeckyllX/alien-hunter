@@ -122,9 +122,9 @@ class TcpSynParser:
             options = cls.parse_tcp_options(opt_bytes)
 
         initial_ttl = cls.estimate_initial_ttl(observed_ttl)
-        mgr = sig_manager or SignatureManager()
+        mgr = sig_manager or SignatureManager.get_instance()
         match: Optional[DeviceFingerprintMatch] = mgr.match_tcp_syn(
-            ttl=initial_ttl, options=options, window_size=window_size
+            ttl=observed_ttl, options=options, window_size=window_size
         )
 
         TcpSynFingerprintStore.get_instance().record(

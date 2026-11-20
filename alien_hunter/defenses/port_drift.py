@@ -42,19 +42,29 @@ class PortDriftTracker:
         # 2. Or cached from initial discovery
         baseline: Optional[Set[str]] = None
         if whitelist_entry:
-            raw_ports = whitelist_entry.get("ports") or whitelist_entry.get("baseline_ports")
+            if "ports" in whitelist_entry and whitelist_entry["ports"] is not None:
+                raw_ports = whitelist_entry["ports"]
+            elif "baseline_ports" in whitelist_entry and whitelist_entry["baseline_ports"] is not None:
+                raw_ports = whitelist_entry["baseline_ports"]
+            else:
+                raw_ports = None
+
             if raw_ports is not None:
                 # Normalize ports e.g. "80", "80/HTTP", 80
                 baseline = set()
                 for p in raw_ports:
                     p_str = str(p)
                     baseline.add(p_str)
-                    # Add port number prefix if formatted like "80/HTTP"
                     if "/" in p_str:
                         baseline.add(p_str.split("/")[0])
 
         if baseline is None and cached_baseline is not None:
-            baseline = set(cached_baseline)
+            baseline = set()
+            for p in cached_baseline:
+                p_str = str(p)
+                baseline.add(p_str)
+                if "/" in p_str:
+                    baseline.add(p_str.split("/")[0])
 
         # If no baseline established, nothing to drift from yet
         if baseline is None:
@@ -79,7 +89,7 @@ class PortDriftTracker:
             is_critical = False
             for high_risk_tag, risk_desc in cls.HIGH_RISK_PORTS.items():
                 hr_num = high_risk_tag.split("/")[0]
-                if np == high_risk_tag or np.startswith(f"{hr_num}/"):
+                if np == high_risk_tag or np == hr_num or np.startswith(f"{hr_num}/"):
                     critical_new_ports.append(f"{np} ({risk_desc})")
                     is_critical = True
                     break
@@ -94,7 +104,7 @@ class PortDriftTracker:
                 f"Newly exposed critical service(s): {', '.join(critical_new_ports)}. "
                 f"Baseline was: [{baseline_display}]. Potential host compromise, backdoor, or malware infection!"
             )
-        elif standard_new_ports:
+        if standard_new_ports:
             threats.append(
                 f"WARNING: Port Drift detected on {display_name} ({ip})! "
                 f"Newly opened port(s): {', '.join(standard_new_ports)} (Baseline: [{baseline_display}])."

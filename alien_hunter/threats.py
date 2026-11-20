@@ -62,20 +62,24 @@ class ThreatDetector:
 
         try:
             res = subprocess.run(
-                ["nmcli", "-f", "BSSID,SSID,CHAN,SECURITY,SIGNAL", "dev", "wifi", "list"],
+                ["nmcli", "-t", "-f", "BSSID,SSID", "dev", "wifi", "list"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
             if res.returncode == 0:
+                import re
                 lines = res.stdout.strip().splitlines()
-                seen_bssids = []
-                for line in lines[1:]:
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        bssid, ssid = parts[0], parts[1]
-                        if ssid == current_ssid:
-                            seen_bssids.append(bssid)
+                seen_bssids = set()
+                for line in lines:
+                    if not line:
+                        continue
+                    parts = re.split(r"(?<!\\):", line, maxsplit=1)
+                    if len(parts) == 2:
+                        bssid = parts[0].replace("\\:", ":").replace("\\\\", "\\").strip().upper()
+                        ssid = parts[1].replace("\\:", ":").replace("\\\\", "\\")
+                        if bssid and ssid == current_ssid:
+                            seen_bssids.add(bssid)
 
                 # Standard dual-band routers broadcast on at most 2 BSSIDs (2.4GHz & 5GHz)
                 if len(seen_bssids) > 2:
@@ -288,7 +292,7 @@ class ThreatDetector:
         local_mac: Optional[str] = None,
         duration: float = 1.0,
         cam_flood_threshold: int = 30,
-        broadcast_storm_threshold: int = 150,
+        broadcast_storm_threshold: int = 400,
     ) -> List[str]:
         """
         Passively sniffs raw Layer-2 Ethernet frames to detect switch CAM table
@@ -323,17 +327,25 @@ class ThreatDetector:
         for dev in devices:
             ip = getattr(dev, "ip", "")
             mac = getattr(dev, "mac", "")
-            if not ip or not mac:
+            if not mac:
                 continue
             mac_upper = mac.upper()
             if (gw_upper and mac_upper == gw_upper) or (local_upper and mac_upper == local_upper):
                 continue
-            if PhantomSweeper.is_out_of_subnet(ip, subnet_cidr):
-                name = getattr(dev, "display_name", ip)
-                threats.append(
-                    f"WARNING: Out-of-Subnet Static Device / Phantom Implant detected! "
-                    f"Host {name} ({ip}) with MAC {mac} is operating outside local subnet {subnet_cidr}."
-                )
+            candidate_ips = []
+            if ip:
+                candidate_ips.append(ip)
+            for alias_ip in (getattr(dev, "aliases", None) or []):
+                if alias_ip and alias_ip not in candidate_ips:
+                    candidate_ips.append(alias_ip)
+            for cand_ip in candidate_ips:
+                if PhantomSweeper.is_out_of_subnet(cand_ip, subnet_cidr):
+                    name = getattr(dev, "display_name", cand_ip)
+                    threats.append(
+                        f"WARNING: Out-of-Subnet Static Device / Phantom Implant detected! "
+                        f"Host {name} ({cand_ip}) with MAC {mac} is operating outside local subnet {subnet_cidr}."
+                    )
+                    break
 
         return threats
 
